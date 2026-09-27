@@ -10,6 +10,8 @@ powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App instagram -Device
 powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App instagram -Device emulator-5554 -Goal profile
 powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Device emulator-5556 -Goal profile
 powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Device emulator-5556 -Goal search
+powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App instagram -Device emulator-5554 -Goal search-to-profile
+powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Device emulator-5556 -Goal search-to-profile
 ```
 
 | App | Goal | Deterministic destination evidence |
@@ -18,25 +20,30 @@ powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Device em
 | Instagram | `profile` | Selected Profile tab and profile header containers |
 | TikTok | `profile` | Selected Profile tab, account-handle marker, profile metric container, and Following/Followers/Likes labels |
 | TikTok | `search` | Unique editable search field, Search button, and observed return icon inside the Search header |
+| Instagram | `search-to-profile` | Home → Search → Profile; each screen uses the markers above |
+| TikTok | `search-to-profile` | Home → Search form → Home → Profile; Search return must restore selected Home and Home content markers |
 
 Every goal starts from verified Home. If necessary, the worker uses the observed Home tab or Search return control to prepare Home first. Preparation is logged separately and cannot satisfy PASS. TikTok Search means opening the Search form, not performing a query or opening a result. App-provided suggestions/hint text may appear; the worker does not type or submit anything.
 
 Defaults preserve the existing regression cases: Instagram uses `emulator-5554` / `search`; TikTok uses `emulator-5556` / `profile`. `-Device` overrides the device explicitly. Without arguments, the runner uses TikTok. `-ListGoals` only lists supported goals and does not start services. Direct Java invocation accepts `SocialAppLabWorker <app> [goal]` with device from `LAB_DEVICE`.
 
-Other goals, including Settings, Inbox, followers lists, submitted searches, content items, and multi-step routes, are unsupported. Unsupported goal names are rejected rather than approximated. The worker stops at login, verification, tutorial, crash prompts, or unrecognized layouts.
+The two fixed multi-step routes use controls inspected on the signed-in devices. Instagram's Search tab exposes the Profile tab. TikTok's Search form exposes only its return icon, so the route verifies Home again before selecting Profile. No query is submitted and no content item is opened. Other goals, including Settings, Inbox, followers lists, submitted searches, content items, and arbitrary routes, are unsupported. Unsupported goal names are rejected rather than approximated. The worker stops at login, verification, tutorial, crash prompts, or unrecognized layouts.
 
 ## Goal verification and reports
 
-Both observed destination controls may be offered to the LLM, along with the requested goal. If the model selects a different destination, the worker stops with `MODEL_GOAL_MISMATCH` before tapping it. It does not change the requested goal to match the model's choice.
+Observed permitted controls are offered to the LLM with the current verified screen and the next required destination. Every route step requires a fresh model decision. If the model selects a different destination, the worker stops with `MODEL_GOAL_MISMATCH` before tapping it. It does not change the route to match the model's choice. Route progress advances only in order; returning Home within the TikTok route is an LLM-selected, verified step, not preparation.
 
-Before tapping, resource ID, label, container ancestry, visibility, enabled state, uniqueness, and foreground app are rechecked. After tapping, the destination must differ from Home and satisfy its app-specific content/state checks across at least three observations spanning two seconds, followed by a post-screenshot check. A single Home/Back tap, repeated controls, changed feed content, the wrong destination, or incomplete destination markers cannot pass. TikTok Search is an overlay: background Home tabs are excluded while its form is visible. Partial forms remain unverified until the bounded wait expires.
+Before tapping, resource ID, label, container ancestry, visibility, enabled state, uniqueness, and foreground app are rechecked. After tapping, the destination must differ from its source screen and satisfy its app-specific content/state checks across at least three observations spanning two seconds, followed by a post-screenshot check. A single Home/Back tap, repeated controls, changed feed content, the wrong destination, or incomplete destination markers cannot pass. TikTok Search is an overlay: background Home tabs are excluded while its form is visible. Partial forms remain unverified until the bounded wait expires.
+
+For multi-step routes, each destination must differ from that step's source, including Search → Home. Every intermediate and final destination receives the same stability check, and the source is checked again before the next tap. Unknown/transient screens may be observed for up to 20 seconds without further actions. The worker stops if they do not become the required verified destination. It never attempts exploratory taps to recover. A final screen check after the route screenshot must also pass.
 
 Each run writes these Git-ignored files under `lab-runs/<app>-<timestamp>/`:
 
-- `report.md`: readable goal, result, stop reason, preparation and LLM actions, verified screens, and screenshot links.
-- `result.json`: the same structured evidence, plus the observation log.
+- `report.md`: readable exact route, result, stop reason, preparation and LLM actions, verified screens, and a per-step before/after screenshot trace.
+- `result.json`: the same structured evidence, including `route`, `steps`, actions, and the observation log. Each step records source, observed control/locator, requested and verified destination, screenshot names, and result. A failed later step preserves earlier verified evidence and cannot produce PASS.
 - `report.txt`: full model decisions, elapsed verification samples, result, and duration.
 - `launch`, `before`, `after`, or `failure` screenshots and native XML when available.
+- `step-N-before` / `step-N-after` screenshots and XML for every tapped route step; `preparation-before` / `preparation-after` when Home preparation is needed. Preparation is excluded from the route's completed-step count.
 - On device-session failure, bounded Android crash/process-exit diagnostics when ADB is available.
 
 Account values and UI trees never go to the model: only allowed navigation labels and the requested goal are sent to local Ollama. Screenshots and UI trees stay local, and both `lab-runs/` and `startup-diagnosis/` are ignored by Git. Reports link only screenshots that actually exist.
@@ -47,7 +54,7 @@ Account values and UI trees never go to the model: only allowed navigation label
 powershell -NoProfile -File D:\BOTFARM\verify-navigation.ps1
 ```
 
-This clean-compiles production/test sources and explicitly executes the dependency-free `NavigationPolicyTest` runner through Maven's exec plugin. `mvn test` alone does not execute this runner. Synthetic trees cover both existing destinations, explicit-goal mismatch, Search overlays/incomplete forms, duplicate/hidden controls, sign-in/verification/crash prompts, stability resets, and report contents. Tests contain no account data.
+This clean-compiles production/test sources and explicitly executes the dependency-free `NavigationPolicyTest` runner through Maven's exec plugin. `mvn test` alone does not execute this runner. Synthetic trees cover existing destinations, skipped/out-of-order route steps, wrong model choices, Search overlays/incomplete forms, duplicate/hidden controls, sign-in/verification/crash/onboarding prompts, stability resets, partial-route failures, and missing report screenshots. Tests contain no account data.
 
 The configured workstation uses JDK 26.0.1, Maven 3.9.16 under `D:\Tools`, the Android SDK under `%LOCALAPPDATA%\Android\Sdk`, local Appium, and Ollama `qwen3:8b`. Java targets release 17. The run script starts local services if needed and compiles the worker.
 

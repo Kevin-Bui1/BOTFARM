@@ -1,13 +1,15 @@
 param(
     [ValidateSet('tiktok','instagram')][string]$App = 'tiktok',
     [ValidatePattern('^[A-Za-z0-9._:-]+$')][string]$Device,
-    [ValidateSet('search','profile')][string]$Goal,
+    [ValidateSet('search','profile','search-to-profile')][string]$Goal,
     [switch]$ListGoals
 )
 $ErrorActionPreference = 'Stop'
 if ($ListGoals) {
     Write-Output 'instagram: search (Home -> Search), profile (Home -> Profile)'
     Write-Output 'tiktok: profile (Home -> Profile), search (Home -> Search form; no query submission)'
+    Write-Output 'instagram: search-to-profile (Home -> Search -> Profile)'
+    Write-Output 'tiktok: search-to-profile (Home -> Search form -> Home -> Profile)'
     return
 }
 if (!$Device) { $Device = if ($App -eq 'tiktok') { 'emulator-5556' } else { 'emulator-5554' } }

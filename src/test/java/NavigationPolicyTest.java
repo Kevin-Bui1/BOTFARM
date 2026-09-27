@@ -79,6 +79,7 @@ public final class NavigationPolicyTest {
         eq("MANUAL_SIGN_IN_REQUIRED", observe("<hierarchy><node password='true'/></hierarchy>").blocker(), "password form");
         eq("VERIFICATION_REQUIRED", observe("<hierarchy><node text='Security check'/></hierarchy>").blocker(), "verification prompt");
         eq("APP_CRASH_OR_ANR_PROMPT", observe("<hierarchy><node text='TikTok keeps stopping'/></hierarchy>").blocker(), "crash prompt");
+        eq("SYSTEM_PERMISSION_PROMPT", observe("<hierarchy><node package='com.google.android.permissioncontroller' resource-id='com.android.permissioncontroller:id/permission_message' text='Allow notifications?'/></hierarchy>").blocker(), "observed OS permission prompt stops without changing settings");
         var blocked = observe(profileXml.replace("</hierarchy>", "<node text='Log in'/></hierarchy>"));
         eq("MANUAL_SIGN_IN_REQUIRED", NavigationPolicy.transition(home, requested, blocked), "login overlay overrides destination markers");
         eq(NavigationPolicy.Destination.UNKNOWN, NavigationPolicy.observe("tiktok", homeXml).destination(), "unknown app layout cannot borrow Instagram verification");
@@ -156,6 +157,76 @@ public final class NavigationPolicyTest {
         eq("", NavigationPolicy.description(null), "missing description normalization");
         eq("", NavigationPolicy.description("null"), "Appium literal null description normalization");
         eq("Profile", NavigationPolicy.description("Profile"), "real observed labels preserved");
+        var igRoute = new NavigationRoute("instagram", "search-to-profile");
+        eq("HOME -> SEARCH -> PROFILE", igRoute.description(), "exact Instagram route");
+        eq(false, igRoute.complete(), "route not complete at start");
+        rejects("MODEL_GOAL_MISMATCH", () -> igRoute.advance(home, requested, profile));
+        eq(0, igRoute.completed(), "skipping Search cannot advance");
+        rejects("SAME_SCREEN", () -> igRoute.advance(home, searchRequest, home));
+        eq(0, igRoute.completed(), "ignored tap cannot advance");
+        igRoute.advance(home, searchRequest, search);
+        eq(false, igRoute.complete(), "intermediate Search cannot pass full route");
+        rejects("ROUTE_SOURCE_CHANGED", () -> igRoute.advance(home, requested, profile));
+        var profileFromSearch = NavigationPolicy.routeChoices(search).stream()
+                .filter(c -> c.destination() == NavigationPolicy.Destination.PROFILE).findFirst().orElseThrow();
+        eq("MANUAL_SIGN_IN_REQUIRED", NavigationPolicy.routeTransition(search, profileFromSearch, blocked), "login between route steps blocks transition");
+        rejects("MANUAL_SIGN_IN_REQUIRED", () -> igRoute.advance(search, profileFromSearch, blocked));
+        eq(1, igRoute.completed(), "blocked intermediate cannot advance");
+        igRoute.advance(search, profileFromSearch, profile);
+        eq(true, igRoute.complete(), "every Instagram step verified");
+        rejects("ROUTE_ALREADY_COMPLETE", () -> igRoute.advance(search, profileFromSearch, profile));
+        var ttRoute = new NavigationRoute("tiktok", "search-to-profile");
+        eq("HOME -> SEARCH -> HOME -> PROFILE", ttRoute.description(), "exact TikTok route");
+        ttRoute.advance(ttBoth, ttSearchAction, overlay);
+        var returnHome = NavigationPolicy.routeChoices(overlay).get(0);
+        eq(NavigationPolicy.Destination.HOME, returnHome.destination(), "only observed Search return offered to LLM");
+        rejects("MODEL_GOAL_MISMATCH", () -> ttRoute.advance(overlay, ttRequested, ttProfile));
+        eq("REPEATED_OR_UNOBSERVED_CONTROL", NavigationPolicy.routeTransition(overlay, ttRequested, ttProfile), "overlay prevents tapping background Profile");
+        ttRoute.advance(overlay, returnHome, ttBoth);
+        eq(false, ttRoute.complete(), "returning Home alone cannot complete route");
+        ttRoute.advance(ttBoth, ttRequested, ttProfile);
+        eq(true, ttRoute.complete(), "TikTok all three steps verified");
+        var unknown = observe("<hierarchy/>");
+        eq(0, NavigationPolicy.routeChoices(unknown).size(), "unknown route source offers no controls");
+        eq("UNKNOWN_SOURCE_SCREEN", NavigationPolicy.routeTransition(unknown, requested, profile), "unknown route source rejected");
+        eq("DESTINATION_NOT_VERIFIED", NavigationPolicy.routeTransition(search, profileFromSearch, unknown), "unknown intermediate never verified");
+        var ambiguousSearch = observe(searchXml.replace("</hierarchy>", node("tab_bar", "", tab("profile_tab", "Profile", false, false)) + "</hierarchy>"));
+        eq(false, NavigationPolicy.routeChoices(ambiguousSearch).contains(profileFromSearch), "ambiguous intermediate control rejected");
+        eq("ONBOARDING_NAVIGATION_REQUIRED", NavigationPolicy.observe("tiktok", ttScreen(true).replace("</hierarchy>", ttNode("bxo", "text='Your avatar, your style'", "") + "</hierarchy>")).blocker(), "observed avatar overlay blocks route");
+        var routeDirectory = java.nio.file.Files.createTempDirectory("route-report-test-");
+        try {
+            var report = new NavigationRunReport("instagram", "fixture", "search-to-profile", routeDirectory);
+            report.route(igRoute.screens());
+            for (String file : List.of("step-1-before.png", "step-1-after.png", "step-2-before.png", "step-2-after.png"))
+                java.nio.file.Files.write(routeDirectory.resolve(file), new byte[]{0});
+            report.action("preparation", homeControl);
+            report.beginStep(1, home.destination(), searchRequest, "step-1-before.png");
+            report.finishStep(1, search.destination(), "step-1-after.png", "VERIFIED");
+            try { report.write(true, "VERIFIED_ROUTE", 1, List.of()); throw new AssertionError("partial route PASS accepted"); }
+            catch (IllegalStateException e) { eq("REPORT_INCOMPLETE_ROUTE", e.getMessage(), "report rejects partial route PASS"); }
+            report.beginStep(2, search.destination(), profileFromSearch, "step-2-before.png");
+            report.failStep(2, "VERIFICATION_REQUIRED");
+            report.write(false, "VERIFICATION_REQUIRED", 2, List.of());
+            Map<?, ?> result = new org.openqa.selenium.json.Json().toType(java.nio.file.Files.readString(routeDirectory.resolve("result.json")), Map.class);
+            eq(false, result.get("passed"), "failed second step remains FAIL");
+            eq("PROFILE", result.get("requestedDestination"), "route final goal recorded separately");
+            var steps = (List<?>) result.get("steps");
+            eq("VERIFIED", ((Map<?, ?>)steps.get(0)).get("result"), "first verified step retained on later failure");
+            eq("VERIFICATION_REQUIRED", ((Map<?, ?>)steps.get(1)).get("result"), "failed step reason recorded");
+            eq("", ((Map<?, ?>)steps.get(1)).get("verifiedDestination"), "failed screen not invented");
+            eq(2, steps.size(), "preparation excluded from route trace");
+            report.finishStep(2, profile.destination(), "step-2-after.png", "VERIFIED");
+            report.write(true, "VERIFIED_ROUTE", 2, List.of());
+            eq(true, java.nio.file.Files.readString(routeDirectory.resolve("report.md")).contains("[Screenshot](step-2-after.png)"), "per-step screenshot in human trace");
+            java.nio.file.Files.delete(routeDirectory.resolve("step-2-after.png"));
+            try { report.write(true, "VERIFIED_ROUTE", 2, List.of()); throw new AssertionError("missing screenshot PASS accepted"); }
+            catch (IllegalStateException e) { eq("REPORT_UNVERIFIED_ROUTE_STEP", e.getMessage(), "missing evidence prevents route PASS"); }
+        } finally {
+            try (var files = java.nio.file.Files.list(routeDirectory)) {
+                for (var file : files.toList()) java.nio.file.Files.delete(file);
+            }
+            java.nio.file.Files.delete(routeDirectory);
+        }
         var stable = new NavigationPolicy.Stability();
         eq(false, stable.accept("VERIFIED", 0), "one observation insufficient");
         eq(false, stable.accept("VERIFIED", 1000), "two observations insufficient");

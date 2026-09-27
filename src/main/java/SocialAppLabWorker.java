@@ -22,7 +22,7 @@ public class SocialAppLabWorker {
 
     public static void main(String[] args) throws Exception {
         if (args.length < 1 || args.length > 2 || !Set.of("instagram", "tiktok").contains(args[0]))
-            throw new IllegalArgumentException("Usage: SocialAppLabWorker tiktok|instagram [search|profile]");
+            throw new IllegalArgumentException("Usage: SocialAppLabWorker tiktok|instagram [search|profile|search-to-profile]");
         long started = System.nanoTime();
         String app = args[0];
         String goalName = args.length == 2 ? args[1] : (app.equals("tiktok") ? "profile" : "search");
@@ -41,9 +41,15 @@ public class SocialAppLabWorker {
         String reason = "NOT_STARTED";
         String stage = "validating requested goal";
         String requested = goalName.toUpperCase(Locale.ROOT);
+        NavigationRoute route = null;
+        int activeStep = 0;
+        NavigationPolicy.Screen lastSource = null;
+        NavigationPolicy.Control lastAction = null;
         try {
-            var goal = NavigationPolicy.goal(app, goalName);
-            log.add("Test goal: HOME -> " + goal);
+            route = new NavigationRoute(app, goalName);
+            report.route(route.screens());
+            requested = route.screens().get(route.screens().size() - 1).name();
+            log.add("Test route: " + route.description());
             stage = "verifying model";
             verifyModel(model);
             log.add("Installed local Ollama model verified: " + model);
@@ -64,65 +70,90 @@ public class SocialAppLabWorker {
                 var home = before.screen().controls().stream()
                         .filter(c -> c.destination() == NavigationPolicy.Destination.HOME && !c.selected()).toList();
                 if (home.size() != 1) throw new IllegalStateException("START_SCREEN_NOT_VERIFIED_HOME");
+                snapshot(driver, dir, "preparation-before");
                 click(driver, app, pkg, home.get(0));
                 report.action("preparation", home.get(0));
                 log.add("Preparation: tapped observed Home/return control (not counted as a verified transition)");
                 before = awaitHome(driver, app, pkg, 15);
+                snapshot(driver, dir, "preparation-after");
+                before = observe(driver, app, pkg);
+                if (before.screen().destination() != NavigationPolicy.Destination.HOME)
+                    throw new IllegalStateException("HOME_PREPARATION_FAILED");
+                report.verified("preparation", before.screen(), "preparation-after.png");
             }
             if (before.screen().destination() != NavigationPolicy.Destination.HOME)
                 throw new IllegalStateException("START_SCREEN_NOT_VERIFIED_HOME");
             snapshot(driver, dir, "before");
             report.verified("start", before.screen(), "before.png");
             log.add("Before: " + before.screen().summary());
-            var choices = NavigationPolicy.choices(before.screen());
-            log.add("Observed destination controls: " + choices);
-            if (choices.isEmpty()) throw new IllegalStateException("NO_UNIQUE_DESTINATION_CONTROLS");
-            stage = "asking local model for destination";
-            int selected = askModel(model, app, goal, choices, 0, log);
-            if (selected < 0) throw new IllegalStateException("MODEL_STOP");
-            var action = choices.get(selected);
-            NavigationPolicy.requireGoal(goal, action);
-            log.add("Requested destination: " + requested + "; locator: " + action.id());
-            stage = "rechecking observed control";
-            before = observe(driver, app, pkg);
-            check(before);
-            if (!NavigationPolicy.choices(before.screen()).contains(action))
-                throw new IllegalStateException("REPEATED_OR_CHANGED_CONTROL");
-            snapshot(driver, dir, "before");
-            click(driver, app, pkg, action);
-            taps++;
-            report.action("LLM-selected goal", action);
-            log.add("Tapped: " + action.label());
-            stage = "verifying requested destination " + requested;
-            var stable = new NavigationPolicy.Stability();
-            long transitionStarted = System.nanoTime();
-            String verdict = "DESTINATION_NOT_VERIFIED";
-            boolean reached = false;
-            while (Duration.ofNanos(System.nanoTime() - transitionStarted).toSeconds() < 20) {
-                Observation after = observe(driver, app, pkg);
-                check(after);
-                verdict = NavigationPolicy.transition(before.screen(), action, after.screen());
-                long elapsed = Duration.ofNanos(System.nanoTime() - transitionStarted).toMillis();
-                log.add("Observation +" + elapsed + "ms: " + after.screen().summary() + "; verdict=" + verdict);
-                reached = stable.accept(verdict, elapsed);
-                if (reached) break;
-                Thread.sleep(700);
+            while (!route.complete()) {
+                activeStep = route.completed() + 1;
+                var goal = route.next();
+                route.requireSource(before.screen());
+                String prefix = "step-" + activeStep;
+                var choices = NavigationPolicy.routeChoices(before.screen());
+                log.add("Observed destination controls: " + choices);
+                if (choices.isEmpty()) throw new IllegalStateException("NO_UNIQUE_DESTINATION_CONTROLS");
+                stage = "asking local model for destination";
+                int selected = askModel(model, app, before.screen().destination(), goal, choices, activeStep, log);
+                if (selected < 0) throw new IllegalStateException("MODEL_STOP");
+                var action = choices.get(selected);
+                NavigationPolicy.requireGoal(goal, action);
+                log.add("Step " + activeStep + ": " + route.source() + " -> " + goal + "; locator: " + action.id());
+                stage = "rechecking observed control";
+                before = observe(driver, app, pkg);
+                check(before);
+                route.requireSource(before.screen());
+                if (!NavigationPolicy.routeChoices(before.screen()).contains(action))
+                    throw new IllegalStateException("REPEATED_OR_CHANGED_CONTROL");
+                snapshot(driver, dir, prefix + "-before");
+                click(driver, app, pkg, action, route.source());
+                taps++;
+                report.action("LLM-selected step " + activeStep, action);
+                report.beginStep(activeStep, before.screen().destination(), action, prefix + "-before.png");
+                log.add("Tapped: " + (action.label().isEmpty() ? "Return to Home (unlabelled icon)" : action.label()));
+                stage = "verifying step " + activeStep + " destination " + goal;
+                var stable = new NavigationPolicy.Stability();
+                long transitionStarted = System.nanoTime();
+                String verdict = "DESTINATION_NOT_VERIFIED";
+                boolean reached = false;
+                while (Duration.ofNanos(System.nanoTime() - transitionStarted).toSeconds() < 20) {
+                    Observation after = observe(driver, app, pkg);
+                    check(after);
+                    verdict = NavigationPolicy.routeTransition(before.screen(), action, after.screen());
+                    long elapsed = Duration.ofNanos(System.nanoTime() - transitionStarted).toMillis();
+                    log.add("Step " + activeStep + " observation +" + elapsed + "ms: " + after.screen().summary() + "; verdict=" + verdict);
+                    reached = stable.accept(verdict, elapsed);
+                    if (reached) break;
+                    Thread.sleep(700);
+                }
+                snapshot(driver, dir, prefix + "-after");
+                // Screenshot capture may take time: verify the requested destination again afterward.
+                Observation finalObservation = observe(driver, app, pkg);
+                check(finalObservation);
+                String finalVerdict = NavigationPolicy.routeTransition(before.screen(), action, finalObservation.screen());
+                if (!reached || !finalVerdict.equals("VERIFIED"))
+                    throw new IllegalStateException(finalVerdict.equals("VERIFIED") ? "DESTINATION_NOT_STABLE" : finalVerdict);
+                route.advance(before.screen(), action, finalObservation.screen());
+                report.finishStep(activeStep, finalObservation.screen().destination(), prefix + "-after.png", "VERIFIED");
+                report.verified("step " + activeStep, finalObservation.screen(), prefix + "-after.png");
+                log.add("After: " + finalObservation.screen().summary());
+                log.add("Verified requested destination using app-specific UI evidence across at least 3 observations spanning 2 seconds");
+                lastSource = before.screen();
+                lastAction = action;
+                before = finalObservation;
             }
             snapshot(driver, dir, "after");
-            // Screenshot capture may take time: verify the requested destination again afterward.
-            Observation finalObservation = observe(driver, app, pkg);
-            check(finalObservation);
-            String finalVerdict = NavigationPolicy.transition(before.screen(), action, finalObservation.screen());
-            if (!reached || !finalVerdict.equals("VERIFIED"))
-                throw new IllegalStateException(finalVerdict.equals("VERIFIED") ? "DESTINATION_NOT_STABLE" : finalVerdict);
-            report.verified("destination", finalObservation.screen(), "after.png");
-            log.add("After: " + finalObservation.screen().summary());
-            log.add("Verified requested destination using app-specific UI evidence across at least 3 observations spanning 2 seconds");
-            reason = "VERIFIED_DESTINATION";
+            var finalScreen = observe(driver, app, pkg).screen();
+            String finalVerdict = NavigationPolicy.routeTransition(lastSource, lastAction, finalScreen);
+            if (!finalVerdict.equals("VERIFIED")) throw new IllegalStateException("FINAL_DESTINATION_CHANGED: " + finalVerdict);
+            reason = route.completed() > 1 ? "VERIFIED_ROUTE" : "VERIFIED_DESTINATION";
             passed = true;
         } catch (Exception e) {
             reason = e instanceof IllegalStateException ? String.valueOf(e.getMessage()) : "SERVICE_OR_UI_ERROR: " + e.getClass().getSimpleName();
-            log.add("STOP while " + stage + ": " + reason);
+            log.add("STOP at route step " + activeStep + " while " + stage + ": " + reason);
+            report.stopContext(activeStep, stage);
+            report.failStep(activeStep, reason);
             if (driver != null) {
                 try { snapshot(driver, dir, "failure"); }
                 catch (Exception ignored) { log.add("Failure UI evidence unavailable"); }
@@ -131,7 +162,8 @@ public class SocialAppLabWorker {
         } finally {
             if (driver != null) try { driver.quit(); }
             catch (Exception ignored) { passed = false; reason = "DRIVER_CLEANUP_FAILED"; }
-            log.add((passed ? "PASS: verified transition HOME -> " + requested : "FAIL: " + reason)
+            log.add((passed ? (route.completed() > 1 ? "PASS: verified route " + route.description()
+                    : "PASS: verified transition HOME -> " + requested) : "FAIL: " + reason)
                     + "; destination taps: " + taps);
             log.add(String.format(Locale.ROOT, "Duration: %.3f seconds", (System.nanoTime() - started) / 1_000_000_000.0));
             Files.write(dir.resolve("report.txt"), log, StandardCharsets.UTF_8);
@@ -176,11 +208,15 @@ public class SocialAppLabWorker {
     }
 
     private static void click(AndroidDriver driver, String app, String pkg, NavigationPolicy.Control action) throws Exception {
+        click(driver, app, pkg, action, null);
+    }
+
+    private static void click(AndroidDriver driver, String app, String pkg, NavigationPolicy.Control action,
+                              NavigationPolicy.Destination expectedSource) throws Exception {
         var current = observe(driver, app, pkg);
-        if (action.destination() != NavigationPolicy.Destination.HOME
-                && current.screen().destination() != NavigationPolicy.Destination.HOME)
+        if (expectedSource != null && current.screen().destination() != expectedSource)
             throw new IllegalStateException("START_SCREEN_CHANGED_BEFORE_TAP");
-        if (current.screen().controls().stream().filter(action::equals).count() != 1)
+        if (!NavigationPolicy.routeChoices(current.screen()).contains(action))
             throw new IllegalStateException("REPEATED_OR_CHANGED_CONTROL");
         List<WebElement> matches = driver.findElements(By.id(action.id())).stream()
                 .filter(WebElement::isDisplayed).filter(WebElement::isEnabled).toList();
@@ -227,16 +263,16 @@ public class SocialAppLabWorker {
             throw new IllegalStateException("LAB_MODEL does not match an installed Ollama model");
     }
 
-    private static int askModel(String model, String app, NavigationPolicy.Destination goal, List<NavigationPolicy.Control> choices, int step, List<String> log)
+    private static int askModel(String model, String app, NavigationPolicy.Destination source, NavigationPolicy.Destination goal, List<NavigationPolicy.Control> choices, int step, List<String> log)
             throws Exception {
         // Only navigation labels reach the local model. Screenshots, handles, messages and credentials stay local.
         String prompt = "You are testing navigation in " + app + " on a prelogged Android emulator. " +
-                "The requested test goal is HOME to " + goal + ". Choose the observed control that reaches that goal, or stop if unavailable. Only output JSON " +
+                "The requested step is " + source + " to " + goal + ". Choose the observed control that reaches that goal, or stop if unavailable. Only output JSON " +
                 "{\"index\":number,\"reason\":string}; index -1 means stop. " +
                 "Never seek to view media, engage, send messages, register accounts or enter credentials. " +
                 "Step " + step + "; choices (zero-based): " +
                 java.util.stream.IntStream.range(0, choices.size())
-                        .mapToObj(i -> i + ":" + choices.get(i).label()).toList();
+                        .mapToObj(i -> i + ":" + choices.get(i).label() + " (destination " + choices.get(i).destination() + ")").toList();
         Json json = new Json();
         String request = json.toJson(Map.of("model", model, "stream", false, "think", false,
                 "format", "json", "prompt", prompt,
@@ -255,7 +291,7 @@ public class SocialAppLabWorker {
         int index = number.intValue();
         if (index < -1 || index >= choices.size()) throw new IllegalStateException("Model selected an invalid navigation index");
         log.add("Model decision: " + index + " (" +
-                (index == -1 ? "stop" : choices.get(index).label()) + ")");
+                (index == -1 ? "stop" : choices.get(index).label().isEmpty() ? "Return to Home (unlabelled icon)" : choices.get(index).label()) + ")");
         return index;
     }
 }

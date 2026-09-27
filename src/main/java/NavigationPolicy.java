@@ -53,6 +53,8 @@ public final class NavigationPolicy {
         for (int i = 0; i < nodes.getLength(); i++) {
             Element node = (Element) nodes.item(i);
             if (!visible(node)) continue;
+            if (node.getAttribute("resource-id").equals("com.android.permissioncontroller:id/permission_message"))
+                blocker = "SYSTEM_PERMISSION_PROMPT";
             for (String attribute : List.of("text", "content-desc")) {
                 String value = node.getAttribute(attribute).strip().toLowerCase(Locale.ROOT);
                 if (value.contains("keeps stopping") || value.contains("isn't responding"))
@@ -77,6 +79,8 @@ public final class NavigationPolicy {
                             && node.getAttribute("content-desc").isBlank()) searchBacks++;
                 }
                 if (id.equals(TT + "tv_strengthen_swipe_up_guide") && blocker.isEmpty())
+                    blocker = "ONBOARDING_NAVIGATION_REQUIRED";
+                if (id.equals(TT + "bxo") && node.getAttribute("text").equals("Your avatar, your style") && blocker.isEmpty())
                     blocker = "ONBOARDING_NAVIGATION_REQUIRED";
                 String text = node.getAttribute("text").strip();
                 String description = node.getAttribute("content-desc").strip();
@@ -169,8 +173,14 @@ public final class NavigationPolicy {
 
     public static List<Control> choices(Screen screen) {
         if (!screen.blocker().isEmpty() || screen.destination() != Destination.HOME) return List.of();
-        return screen.controls().stream().filter(c -> !c.selected() && c.destination() != Destination.HOME)
+        return routeChoices(screen);
+    }
+
+    public static List<Control> routeChoices(Screen screen) {
+        if (!screen.blocker().isEmpty() || screen.destination() == Destination.UNKNOWN) return List.of();
+        return screen.controls().stream().filter(c -> !c.selected() && c.destination() != screen.destination())
                 .filter(c -> screen.controls().stream().filter(other -> other.id().equals(c.id())).count() == 1)
+                .filter(c -> screen.controls().stream().filter(other -> other.destination() == c.destination()).count() == 1)
                 .toList();
     }
 
@@ -178,13 +188,23 @@ public final class NavigationPolicy {
         if (!after.blocker().isEmpty()) return after.blocker();
         if (!before.blocker().isEmpty() || before.destination() != Destination.HOME)
             return "START_SCREEN_NOT_VERIFIED_HOME";
-        if (!choices(before).contains(requested)) return "REPEATED_OR_UNOBSERVED_CONTROL";
+        return routeTransition(before, requested, after);
+    }
+
+    public static String routeTransition(Screen before, Control requested, Screen after) {
+        if (!after.blocker().isEmpty()) return after.blocker();
+        if (!before.blocker().isEmpty()) return before.blocker();
+        if (before.destination() == Destination.UNKNOWN) return "UNKNOWN_SOURCE_SCREEN";
+        if (!routeChoices(before).contains(requested)) return "REPEATED_OR_UNOBSERVED_CONTROL";
         if (after.destination() == before.destination()) return "SAME_SCREEN";
         if (after.destination() == Destination.UNKNOWN) return "DESTINATION_NOT_VERIFIED";
         if (after.destination() != requested.destination()) return "WRONG_DESTINATION";
         boolean searchForm = requested.id().equals(TT + "k_8") && after.destination() == Destination.SEARCH
                 && after.markers().contains("tiktok:search-form");
-        if (!searchForm && after.controls().stream().filter(c -> c.id().equals(requested.id())).count() != 1)
+        boolean searchReturn = before.destination() == Destination.SEARCH && before.markers().contains("tiktok:search-form")
+                && requested.id().equals(TT + "bs5") && after.destination() == Destination.HOME
+                && after.controls().stream().filter(c -> c.id().equals(TT + "omq") && c.selected()).count() == 1;
+        if (!searchForm && !searchReturn && after.controls().stream().filter(c -> c.id().equals(requested.id())).count() != 1)
             return "AMBIGUOUS_DESTINATION";
         if (before.markers().equals(after.markers())) return "SAME_SCREEN_CONTENT";
         return "VERIFIED";
