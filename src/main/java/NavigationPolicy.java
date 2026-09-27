@@ -18,7 +18,7 @@ public final class NavigationPolicy {
     // Observed on TikTok 47.0.3. Fail closed when the native layout changes.
     private static final String TT = "com.zhiliaoapp.musically:id/";
     private static final Map<String, Destination> TIKTOK_TABS = Map.of(
-            TT + "omq", Destination.HOME, TT + "oms", Destination.PROFILE);
+            TT + "omq", Destination.HOME, TT + "oms", Destination.PROFILE, TT + "k_8", Destination.SEARCH);
     private static final Set<String> TIKTOK_MARKERS = Set.of(TT + "long_press_layout", TT + "t5q");
     private static final Map<String, Destination> TABS = Map.of(
             IG + "feed_tab", Destination.HOME, IG + "profile_tab", Destination.PROFILE,
@@ -49,6 +49,7 @@ public final class NavigationPolicy {
         Set<String> markers = new TreeSet<>();
         List<Control> controls = new ArrayList<>();
         String blocker = "";
+        int searchInputs = 0, searchButtons = 0, searchBacks = 0;
         for (int i = 0; i < nodes.getLength(); i++) {
             Element node = (Element) nodes.item(i);
             if (!visible(node)) continue;
@@ -68,6 +69,13 @@ public final class NavigationPolicy {
             String id = node.getAttribute("resource-id");
             if ((tiktok ? TIKTOK_MARKERS : MARKERS).contains(id)) markers.add(id);
             if (tiktok) {
+                if (insideContainer(node, TT + "vd5") && "true".equals(node.getAttribute("enabled"))) {
+                    if (id.equals(TT + "hu0") && node.getAttribute("class").equals("android.widget.EditText")) searchInputs++;
+                    if (id.equals(TT + "tv_search_textview") && node.getAttribute("text").equals("Search")
+                            && node.getAttribute("class").equals("android.widget.Button")) searchButtons++;
+                    if (id.equals(TT + "bs5") && "true".equals(node.getAttribute("clickable"))
+                            && node.getAttribute("content-desc").isBlank()) searchBacks++;
+                }
                 if (id.equals(TT + "tv_strengthen_swipe_up_guide") && blocker.isEmpty())
                     blocker = "ONBOARDING_NAVIGATION_REQUIRED";
                 String text = node.getAttribute("text").strip();
@@ -84,8 +92,21 @@ public final class NavigationPolicy {
             if (destination == null || !"true".equals(node.getAttribute("clickable"))
                     || !"true".equals(node.getAttribute("enabled"))) continue;
             String label = node.getAttribute("content-desc").strip();
-            if (!LABELS.get(destination).equals(label) || !insideContainer(node, tabBar)) continue;
+            String expectedLabel = tiktok && destination == Destination.SEARCH ? "Search" : LABELS.get(destination);
+            String container = tiktok && destination == Destination.SEARCH ? TT + "uvy" : tabBar;
+            if (!expectedLabel.equals(label) || !insideContainer(node, container)) continue;
             controls.add(new Control(label, id, destination, selected(node)));
+        }
+        // This form overlays Home; ignore its background tabs rather than misclassify it as Home.
+        if (tiktok && (searchInputs > 0 || searchButtons > 0 || searchBacks > 0)) {
+            boolean complete = searchInputs == 1 && searchButtons == 1 && searchBacks == 1;
+            if (complete) {
+                markers.clear();
+                markers.addAll(Set.of("tiktok:search-form", TT + "vd5", TT + "hu0", TT + "tv_search_textview", TT + "bs5"));
+                return new Screen(Destination.SEARCH, Set.copyOf(markers),
+                        List.of(new Control("", TT + "bs5", Destination.HOME, false)), blocker);
+            }
+            return new Screen(Destination.UNKNOWN, Set.copyOf(markers), List.of(), blocker);
         }
         Set<Destination> selected = new HashSet<>();
         controls.stream().filter(Control::selected).forEach(c -> selected.add(c.destination()));
@@ -131,6 +152,21 @@ public final class NavigationPolicy {
         };
     }
 
+    public static String description(String value) {
+        // UiAutomator2 may serialize a missing content description as the literal string "null".
+        return value == null || value.equals("null") ? "" : value.strip();
+    }
+
+    public static Destination goal(String app, String name) {
+        if (!Set.of("instagram", "tiktok").contains(app) || !Set.of("search", "profile").contains(name))
+            throw new IllegalStateException("UNSUPPORTED_GOAL: " + app + "/" + name);
+        return name.equals("search") ? Destination.SEARCH : Destination.PROFILE;
+    }
+
+    public static void requireGoal(Destination goal, Control action) {
+        if (action.destination() != goal) throw new IllegalStateException("MODEL_GOAL_MISMATCH: requested " + goal + ", chose " + action.destination());
+    }
+
     public static List<Control> choices(Screen screen) {
         if (!screen.blocker().isEmpty() || screen.destination() != Destination.HOME) return List.of();
         return screen.controls().stream().filter(c -> !c.selected() && c.destination() != Destination.HOME)
@@ -146,7 +182,9 @@ public final class NavigationPolicy {
         if (after.destination() == before.destination()) return "SAME_SCREEN";
         if (after.destination() == Destination.UNKNOWN) return "DESTINATION_NOT_VERIFIED";
         if (after.destination() != requested.destination()) return "WRONG_DESTINATION";
-        if (after.controls().stream().filter(c -> c.id().equals(requested.id())).count() != 1)
+        boolean searchForm = requested.id().equals(TT + "k_8") && after.destination() == Destination.SEARCH
+                && after.markers().contains("tiktok:search-form");
+        if (!searchForm && after.controls().stream().filter(c -> c.id().equals(requested.id())).count() != 1)
             return "AMBIGUOUS_DESTINATION";
         if (before.markers().equals(after.markers())) return "SAME_SCREEN_CONTENT";
         return "VERIFIED";

@@ -34,6 +34,17 @@ public final class NavigationPolicyTest {
                 ttNode("omq", "content-desc='Home' clickable='true' enabled='true' selected='" + !profile + "'", "")
                 + ttNode("oms", "content-desc='Profile' clickable='true' enabled='true' selected='" + profile + "'", "")) + "</hierarchy>";
     }
+    private static String ttSearchForm() {
+        return ttNode("vd5", "", ttNode("hu0", "enabled='true' class='android.widget.EditText'", "")
+                + ttNode("tv_search_textview", "enabled='true' class='android.widget.Button' text='Search'", "")
+                + ttNode("bs5", "enabled='true' clickable='true' content-desc=''", ""));
+    }
+    private static void rejects(String reason, Runnable operation) {
+        try { operation.run(); } catch (IllegalStateException e) {
+            eq(true, e.getMessage().startsWith(reason), "typed rejection " + reason); return;
+        }
+        throw new AssertionError("Expected rejection: " + reason);
+    }
     public static void main(String[] args) throws Exception {
         String homeXml = screen("HOME", marker("reels_tray_container"));
         String profileXml = screen("PROFILE", marker("profile_header_container") + marker("row_profile_header"));
@@ -92,6 +103,59 @@ public final class NavigationPolicyTest {
         var ttTutorial = NavigationPolicy.observe("tiktok", ttScreen(false).replace("</hierarchy>", ttNode("tv_strengthen_swipe_up_guide", "text='Swipe up for more'", "") + "</hierarchy>"));
         eq("ONBOARDING_NAVIGATION_REQUIRED", ttTutorial.blocker(), "TikTok tutorial accurately blocks action");
         eq(0, NavigationPolicy.choices(ttTutorial).size(), "no actions while onboarding intercepts tabs");
+        eq(NavigationPolicy.Destination.SEARCH, NavigationPolicy.goal("instagram", "search"), "explicit Instagram goal");
+        eq(NavigationPolicy.Destination.PROFILE, NavigationPolicy.goal("instagram", "profile"), "new Instagram goal");
+        eq(NavigationPolicy.Destination.SEARCH, NavigationPolicy.goal("tiktok", "search"), "new TikTok goal");
+        rejects("UNSUPPORTED_GOAL", () -> NavigationPolicy.goal("tiktok", "inbox"));
+        rejects("UNSUPPORTED_GOAL", () -> NavigationPolicy.goal("other", "profile"));
+        rejects("MODEL_GOAL_MISMATCH", () -> NavigationPolicy.requireGoal(NavigationPolicy.Destination.SEARCH, requested));
+        NavigationPolicy.requireGoal(NavigationPolicy.Destination.PROFILE, requested);
+        String ttSearchControl = ttNode("uvy", "", ttNode("k_8", "content-desc='Search' clickable='true' enabled='true'", ""));
+        String ttBothXml = ttScreen(false).replace("</hierarchy>", ttSearchControl + "</hierarchy>");
+        var ttBoth = NavigationPolicy.observe("tiktok", ttBothXml);
+        eq(2, NavigationPolicy.choices(ttBoth).size(), "LLM sees both observed TikTok destinations");
+        var ttSearchAction = NavigationPolicy.choices(ttBoth).stream().filter(c -> c.destination() == NavigationPolicy.Destination.SEARCH).findFirst().orElseThrow();
+        String overlayXml = ttBothXml.replace("</hierarchy>", ttSearchForm() + "</hierarchy>");
+        var overlay = NavigationPolicy.observe("tiktok", overlayXml);
+        eq(NavigationPolicy.Destination.SEARCH, overlay.destination(), "search overlay supersedes selected background Home");
+        eq("VERIFIED", NavigationPolicy.transition(ttBoth, ttSearchAction, overlay), "Search form transition without persistent selected tab");
+        eq("WRONG_DESTINATION", NavigationPolicy.transition(ttBoth, ttSearchAction, ttProfile), "Profile cannot satisfy requested Search");
+        eq(1, overlay.controls().size(), "Search only exposes return control, never submit");
+        eq("com.zhiliaoapp.musically:id/bs5", overlay.controls().get(0).id(), "observed back icon for preparation");
+        eq(0, NavigationPolicy.choices(overlay).size(), "Search cannot cause query submission");
+        eq(NavigationPolicy.Destination.UNKNOWN, NavigationPolicy.observe("tiktok", overlayXml.replace("class='android.widget.EditText'", "class='android.widget.TextView'")).destination(), "real editable field required");
+        eq(NavigationPolicy.Destination.UNKNOWN, NavigationPolicy.observe("tiktok", overlayXml.replace("id/bs5", "id/unknown")).destination(), "Search back control required");
+        eq(NavigationPolicy.Destination.UNKNOWN, NavigationPolicy.observe("tiktok", overlayXml.replace("</hierarchy>", ttSearchForm() + "</hierarchy>")).destination(), "duplicate Search form rejected");
+        eq("MANUAL_SIGN_IN_REQUIRED", NavigationPolicy.observe("tiktok", overlayXml.replace("</hierarchy>", "<node text='Log in to TikTok'/></hierarchy>")).blocker(), "Search overlay cannot bypass sign-in");
+        eq(NavigationPolicy.Destination.HOME, NavigationPolicy.observe("tiktok", ttBothXml.replace("</hierarchy>", "<node displayed='false'>" + ttSearchForm() + "</node></hierarchy>")).destination(), "hidden Search does not override Home");
+        var reportDirectory = java.nio.file.Files.createTempDirectory("navigation-report-test-");
+        try {
+            var report = new NavigationRunReport("tiktok", "emulator-fixture", "search", reportDirectory);
+            report.action("LLM-selected goal", ttSearchAction);
+            report.verified("start", ttBoth, "before.png");
+            report.write(false, "SAME_SCREEN", 1, List.of("Goal: SEARCH"));
+            Map<?, ?> result = new org.openqa.selenium.json.Json().toType(java.nio.file.Files.readString(reportDirectory.resolve("result.json")), Map.class);
+            eq(false, result.get("passed"), "report preserves failure despite a tap");
+            eq("home-to-search", result.get("goal"), "report preserves explicit goal");
+            eq("SAME_SCREEN", result.get("reason"), "report has accurate stop reason");
+            eq(1, ((List<?>) result.get("actions")).size(), "report includes actual actions");
+            eq(1, ((List<?>) result.get("verifiedScreens")).size(), "failed destination not fabricated");
+            eq(0, ((List<?>) result.get("screenshots")).size(), "missing screenshots not claimed");
+            eq(true, java.nio.file.Files.readString(reportDirectory.resolve("report.md")).contains("Screenshot unavailable"), "human report flags missing screenshot");
+            java.nio.file.Files.write(reportDirectory.resolve("after.png"), new byte[]{0});
+            report.verified("destination", overlay, "after.png");
+            report.write(true, "VERIFIED_DESTINATION", 1, List.of("VERIFIED"));
+            result = new org.openqa.selenium.json.Json().toType(java.nio.file.Files.readString(reportDirectory.resolve("result.json")), Map.class);
+            eq(true, result.get("passed"), "successful structured report");
+            eq(List.of("after.png"), result.get("screenshots"), "report links existing artifacts");
+            eq(true, java.nio.file.Files.readString(reportDirectory.resolve("report.md")).contains("[Screenshot](after.png)"), "human report links destination screenshot");
+        } finally {
+            for (String name : List.of("after.png", "result.json", "report.md")) java.nio.file.Files.deleteIfExists(reportDirectory.resolve(name));
+            java.nio.file.Files.deleteIfExists(reportDirectory);
+        }
+        eq("", NavigationPolicy.description(null), "missing description normalization");
+        eq("", NavigationPolicy.description("null"), "Appium literal null description normalization");
+        eq("Profile", NavigationPolicy.description("Profile"), "real observed labels preserved");
         var stable = new NavigationPolicy.Stability();
         eq(false, stable.accept("VERIFIED", 0), "one observation insufficient");
         eq(false, stable.accept("VERIFIED", 1000), "two observations insufficient");
