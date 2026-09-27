@@ -1,10 +1,13 @@
-param([ValidateSet('tiktok','instagram')][string]$App = 'tiktok')
+param(
+    [ValidateSet('tiktok','instagram')][string]$App = 'tiktok',
+    [ValidatePattern('^[A-Za-z0-9._:-]+$')][string]$Device = 'emulator-5554'
+)
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 $env:JAVA_HOME = 'C:\Program Files\Java\jdk-26.0.1'
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 $env:LAB_MODEL = 'qwen3:8b'
-$env:LAB_DEVICE = 'emulator-5554'
+$env:LAB_DEVICE = $Device
 $env:OLLAMA_HOST = '127.0.0.1:11434'
 
 function Wait-LocalApi([string]$Url) {

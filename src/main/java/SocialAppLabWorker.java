@@ -1,18 +1,10 @@
-import io.appium.java_client.AppiumBy;
 import io.appium.java_client.android.AndroidDriver;
 import io.appium.java_client.android.options.UiAutomator2Options;
 import org.openqa.selenium.By;
 import org.openqa.selenium.OutputType;
 import org.openqa.selenium.WebElement;
-import org.openqa.selenium.WebDriverException;
-import org.openqa.selenium.support.ui.WebDriverWait;
 import org.openqa.selenium.json.Json;
-import org.w3c.dom.Element;
-import org.w3c.dom.NodeList;
-import org.xml.sax.InputSource;
 
-import javax.xml.parsers.DocumentBuilderFactory;
-import java.io.StringReader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -23,27 +15,17 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 
 public class SocialAppLabWorker {
-    private record Choice(String label, String locatorKind, String locator) {
-        By by() { return locatorKind.equals("id") ? By.id(locator) : AppiumBy.accessibilityId(locator); }
-    }
-
-    // Exact navigation labels only. Content tiles, videos, reactions and composer controls are excluded.
-    private static final Set<String> NAVIGATION = Set.of(
-            "home", "search", "discover", "explore", "profile", "me", "settings", "settings and privacy",
-            "your profile", "back");
-    private static final String BLOCKERS = "captcha|verify to continue|verify you're human|security check|" +
-            "suspicious activity|keeps stopping|isn't responding|log in to tiktok|sign up for tiktok|" +
-            "log in or sign up|enter your password|create account";
+    private record Observation(String xml, NavigationPolicy.Screen screen) {}
 
     public static void main(String[] args) throws Exception {
-        long started = System.nanoTime();
-        if (args.length != 1 || !(args[0].equals("tiktok") || args[0].equals("instagram"))) {
+        if (args.length != 1 || !Set.of("instagram", "tiktok").contains(args[0]))
             throw new IllegalArgumentException("Usage: SocialAppLabWorker tiktok|instagram");
-        }
+        long started = System.nanoTime();
         String app = args[0];
-        String pkg = app.equals("tiktok") ? "com.zhiliaoapp.musically" : "com.instagram.android";
+        String pkg = app.equals("instagram") ? "com.instagram.android" : "com.zhiliaoapp.musically";
         String device = System.getenv().getOrDefault("LAB_DEVICE", "emulator-5554");
         String model = System.getenv("LAB_MODEL");
         Path dir = Path.of(System.getProperty("worker.projectDir", "."), "lab-runs",
@@ -54,90 +36,171 @@ public class SocialAppLabWorker {
         AndroidDriver driver = null;
         boolean passed = false;
         int taps = 0;
-        String stage = "verifying local Ollama model";
+        String reason = "NOT_STARTED";
+        String stage = "verifying model";
+        String requested = "none";
         try {
             verifyModel(model);
             log.add("Installed local Ollama model verified: " + model);
-            stage = "creating native UiAutomator2 session";
-            UiAutomator2Options options = new UiAutomator2Options()
-                    .setUdid(device).setDeviceName(device).setNoReset(true);
+            stage = "creating native session";
+            var options = new UiAutomator2Options().setUdid(device).setDeviceName(device).setNoReset(true);
             options.setCapability("appium:autoLaunch", false);
             options.setCapability("appium:newCommandTimeout", 180);
             driver = new AndroidDriver(URI.create("http://127.0.0.1:4723").toURL(), options);
             driver.setSetting("waitForIdleTimeout", 1000);
-            if (!driver.isAppInstalled(pkg)) throw new IllegalStateException("Install " + app + " on " + device + " first");
-            stage = "launching TikTok and waiting for its native accessibility UI";
+            if (!driver.isAppInstalled(pkg)) throw new IllegalStateException("APP_NOT_INSTALLED");
+            stage = "launching " + app;
             driver.activateApp(pkg);
-            Files.write(dir.resolve("launch.png"), driver.getScreenshotAs(OutputType.BYTES));
-            final AndroidDriver activeDriver = driver;
-            String launchXml = new WebDriverWait(driver, Duration.ofSeconds(45))
-                    .ignoring(WebDriverException.class).until(d -> {
-                        String source = activeDriver.getPageSource();
-                        checkScreen(activeDriver, pkg, source);
-                        return source.contains("text=\"") ? source : null;
-                    });
-            log.add("Foreground package after launch: " + driver.getCurrentPackage());
-            checkScreen(driver, pkg, launchXml);
-            log.add("Native app launched with existing data preserved");
-            Set<String> visited = new HashSet<>();
-            for (int step = 0; step < 5; step++) {
-                stage = "observing navigation step " + step;
-                Files.write(dir.resolve("step-" + step + ".png"), driver.getScreenshotAs(OutputType.BYTES));
-                String xml = driver.getPageSource();
-                checkScreen(driver, pkg, xml);
-                List<Choice> choices = choices(driver, xml);
-                String fingerprint = choices.toString();
-                log.add("Step " + step + " navigation: " + choices.stream().map(Choice::label).toList());
-                if (choices.isEmpty() || !visited.add(fingerprint)) {
-                    log.add("Stopped: no new navigation choices");
-                    break;
-                }
-                int selected = askModel(model, app, choices, step, log);
-                if (selected < 0) { log.add("Model chose STOP"); break; }
-                Choice action = choices.get(selected);
-                // Recheck the locator and foreground immediately before the tap.
-                if (!pkg.equals(driver.getCurrentPackage())) throw new IllegalStateException("App left foreground; stopping");
-                List<WebElement> matches = driver.findElements(action.by()).stream()
-                        .filter(WebElement::isDisplayed).filter(WebElement::isEnabled).toList();
-                if (matches.size() != 1) throw new IllegalStateException("Navigation target changed or became ambiguous");
-                checkScreen(driver, pkg, driver.getPageSource());
-                WebElement target = matches.get(0);
-                String description = target.getAttribute("content-desc");
-                String label = description != null && !description.isBlank() ? description.strip() : target.getText().strip();
-                if (!label.equals(action.label()) || !NAVIGATION.contains(label.toLowerCase(Locale.ROOT)))
-                    throw new IllegalStateException("Navigation label changed; refusing action");
-                matches.get(0).click();
-                taps++;
-                log.add("Tapped: " + action.label());
-                Thread.sleep(1200);
+            snapshot(driver, dir, "launch");
+            Observation before = awaitRecognized(driver, app, pkg, 20);
+            check(before);
+            if (before.screen().destination() != NavigationPolicy.Destination.HOME) {
+                stage = "preparing observed Home tab";
+                var home = before.screen().controls().stream()
+                        .filter(c -> c.destination() == NavigationPolicy.Destination.HOME && !c.selected()).toList();
+                if (home.size() != 1) throw new IllegalStateException("START_SCREEN_NOT_VERIFIED_HOME");
+                click(driver, app, pkg, home.get(0));
+                log.add("Preparation: tapped observed Home (not counted as a verified transition)");
+                before = awaitHome(driver, app, pkg, 15);
             }
-            Files.write(dir.resolve("final.png"), driver.getScreenshotAs(OutputType.BYTES));
-            checkScreen(driver, pkg, driver.getPageSource());
-            if (taps == 0) throw new IllegalStateException("Observation completed but no navigation was exercised");
-            log.add("Completed bounded navigation test");
+            if (before.screen().destination() != NavigationPolicy.Destination.HOME)
+                throw new IllegalStateException("START_SCREEN_NOT_VERIFIED_HOME");
+            snapshot(driver, dir, "before");
+            log.add("Before: " + before.screen().summary());
+            var choices = NavigationPolicy.choices(before.screen());
+            log.add("Observed destination controls: " + choices);
+            if (choices.isEmpty()) throw new IllegalStateException("NO_UNIQUE_DESTINATION_CONTROLS");
+            stage = "asking local model for destination";
+            int selected = askModel(model, app, choices, 0, log);
+            if (selected < 0) throw new IllegalStateException("MODEL_STOP");
+            var action = choices.get(selected);
+            requested = action.destination().name();
+            log.add("Requested destination: " + requested + "; locator: " + action.id());
+            stage = "rechecking observed control";
+            before = observe(driver, app, pkg);
+            check(before);
+            if (!NavigationPolicy.choices(before.screen()).contains(action))
+                throw new IllegalStateException("REPEATED_OR_CHANGED_CONTROL");
+            snapshot(driver, dir, "before");
+            click(driver, app, pkg, action);
+            taps++;
+            log.add("Tapped: " + action.label());
+            stage = "verifying requested destination " + requested;
+            var stable = new NavigationPolicy.Stability();
+            long transitionStarted = System.nanoTime();
+            String verdict = "DESTINATION_NOT_VERIFIED";
+            boolean reached = false;
+            while (Duration.ofNanos(System.nanoTime() - transitionStarted).toSeconds() < 20) {
+                Observation after = observe(driver, app, pkg);
+                check(after);
+                verdict = NavigationPolicy.transition(before.screen(), action, after.screen());
+                long elapsed = Duration.ofNanos(System.nanoTime() - transitionStarted).toMillis();
+                log.add("Observation +" + elapsed + "ms: " + after.screen().summary() + "; verdict=" + verdict);
+                reached = stable.accept(verdict, elapsed);
+                if (reached) break;
+                Thread.sleep(700);
+            }
+            snapshot(driver, dir, "after");
+            // Screenshot capture may take time: verify the requested destination again afterward.
+            Observation finalObservation = observe(driver, app, pkg);
+            check(finalObservation);
+            String finalVerdict = NavigationPolicy.transition(before.screen(), action, finalObservation.screen());
+            if (!reached || !finalVerdict.equals("VERIFIED"))
+                throw new IllegalStateException(finalVerdict.equals("VERIFIED") ? "DESTINATION_NOT_STABLE" : finalVerdict);
+            log.add("After: " + finalObservation.screen().summary());
+            log.add("Verified selected destination and destination-specific content across at least 3 observations spanning 2 seconds");
+            reason = "VERIFIED_DESTINATION";
             passed = true;
         } catch (Exception e) {
-            log.add("Stopped while " + stage + ": " + e.getClass().getSimpleName() + ": " +
-                    (e instanceof IllegalStateException ? String.valueOf(e.getMessage()) : "native UI unavailable, app stalled, or service request failed; inspect screenshot and Appium console"));
+            reason = e instanceof IllegalStateException ? String.valueOf(e.getMessage()) : "SERVICE_OR_UI_ERROR: " + e.getClass().getSimpleName();
+            log.add("STOP while " + stage + ": " + reason);
             if (driver != null) {
-                try { Files.write(dir.resolve("failure.png"), driver.getScreenshotAs(OutputType.BYTES)); }
-                catch (Exception ignored) { log.add("Failure screenshot unavailable"); }
+                try { snapshot(driver, dir, "failure"); }
+                catch (Exception ignored) { log.add("Failure UI evidence unavailable"); }
             }
+            collectAndroidEvidence(device, pkg, dir, log);
         } finally {
-            if (driver != null) try { driver.quit(); } catch (Exception ignored) { passed = false; log.add("Driver cleanup failed"); }
-            log.add((passed ? "PASS" : "FAIL") + ": navigation taps completed: " + taps);
+            if (driver != null) try { driver.quit(); }
+            catch (Exception ignored) { passed = false; reason = "DRIVER_CLEANUP_FAILED"; }
+            log.add((passed ? "PASS: verified transition HOME -> " + requested : "FAIL: " + reason)
+                    + "; destination taps: " + taps);
             log.add(String.format(Locale.ROOT, "Duration: %.3f seconds", (System.nanoTime() - started) / 1_000_000_000.0));
             Files.write(dir.resolve("report.txt"), log, StandardCharsets.UTF_8);
-            System.out.println("Report: " + dir.resolve("report.txt").toAbsolutePath());
+            Files.writeString(dir.resolve("result.json"), new Json().toJson(Map.of(
+                    "app", app, "device", device, "passed", passed, "reason", reason,
+                    "requestedDestination", requested, "destinationTaps", taps)), StandardCharsets.UTF_8);
+            System.out.println("Report: " + dir.resolve("report.txt"));
             log.forEach(System.out::println);
         }
-        if (!passed) throw new IllegalStateException("Social app lab run failed; inspect " + dir.resolve("report.txt"));
+        if (!passed) throw new IllegalStateException("Navigation not verified; inspect " + dir.resolve("report.txt"));
     }
 
-    private static void checkScreen(AndroidDriver driver, String pkg, String xml) {
-        if (xml.toLowerCase(Locale.ROOT).matches("(?s).*\\b(" + BLOCKERS + ")\\b.*"))
-            throw new IllegalStateException("Login, verification, crash or security prompt detected; inspect screenshot");
-        if (!pkg.equals(driver.getCurrentPackage())) throw new IllegalStateException("App left foreground; stopping");
+    private static Observation observe(AndroidDriver driver, String app, String pkg) throws Exception {
+        String xml = driver.getPageSource();
+        var screen = NavigationPolicy.observe(app, xml);
+        if (!screen.blocker().isEmpty()) throw new IllegalStateException(screen.blocker());
+        if (!pkg.equals(driver.getCurrentPackage())) throw new IllegalStateException("APP_LEFT_FOREGROUND");
+        return new Observation(xml, screen);
+    }
+
+    private static void check(Observation observation) {
+        if (!observation.screen().blocker().isEmpty()) throw new IllegalStateException(observation.screen().blocker());
+    }
+
+    private static Observation awaitRecognized(AndroidDriver driver, String app, String pkg, int seconds) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(seconds).toNanos();
+        Observation observation;
+        do {
+            observation = observe(driver, app, pkg);
+            if (observation.screen().destination() != NavigationPolicy.Destination.UNKNOWN) return observation;
+            Thread.sleep(700);
+        } while (System.nanoTime() < deadline);
+        throw new IllegalStateException("START_SCREEN_NOT_RECOGNIZED: no verified signed-in navigation surface");
+    }
+
+    private static Observation awaitHome(AndroidDriver driver, String app, String pkg, int seconds) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(seconds).toNanos();
+        do {
+            var observation = observe(driver, app, pkg);
+            if (observation.screen().destination() == NavigationPolicy.Destination.HOME) return observation;
+            Thread.sleep(700);
+        } while (System.nanoTime() < deadline);
+        throw new IllegalStateException("HOME_PREPARATION_FAILED");
+    }
+
+    private static void click(AndroidDriver driver, String app, String pkg, NavigationPolicy.Control action) throws Exception {
+        var current = observe(driver, app, pkg);
+        if (action.destination() != NavigationPolicy.Destination.HOME
+                && current.screen().destination() != NavigationPolicy.Destination.HOME)
+            throw new IllegalStateException("START_SCREEN_CHANGED_BEFORE_TAP");
+        if (current.screen().controls().stream().filter(action::equals).count() != 1)
+            throw new IllegalStateException("REPEATED_OR_CHANGED_CONTROL");
+        List<WebElement> matches = driver.findElements(By.id(action.id())).stream()
+                .filter(WebElement::isDisplayed).filter(WebElement::isEnabled).toList();
+        if (matches.size() != 1 || !action.label().equals(matches.get(0).getAttribute("content-desc")))
+            throw new IllegalStateException("AMBIGUOUS_OR_CHANGED_CONTROL");
+        matches.get(0).click();
+    }
+
+    private static void snapshot(AndroidDriver driver, Path dir, String name) throws Exception {
+        Files.writeString(dir.resolve(name + ".xml"), driver.getPageSource(), StandardCharsets.UTF_8);
+        Files.write(dir.resolve(name + ".png"), driver.getScreenshotAs(OutputType.BYTES));
+    }
+
+    private static void collectAndroidEvidence(String device, String pkg, Path dir, List<String> log) {
+        String sdk = System.getenv("ANDROID_HOME");
+        if (sdk == null) { log.add("Android diagnostics unavailable: ANDROID_HOME missing"); return; }
+        String adb = Path.of(sdk, "platform-tools", "adb.exe").toString();
+        for (var entry : Map.of("android-crash.txt", List.of("logcat", "-b", "crash", "-d", "-t", "200"),
+                "android-exit-info.txt", List.of("shell", "dumpsys", "activity", "exit-info", pkg)).entrySet()) {
+            try {
+                List<String> command = new ArrayList<>(List.of(adb, "-s", device));
+                command.addAll(entry.getValue());
+                Process process = new ProcessBuilder(command).redirectErrorStream(true)
+                        .redirectOutput(dir.resolve(entry.getKey()).toFile()).start();
+                if (!process.waitFor(10, TimeUnit.SECONDS)) { process.destroyForcibly(); log.add("Diagnostic timed out: " + entry.getKey()); }
+            } catch (Exception ignored) { log.add("Diagnostic unavailable: " + entry.getKey()); }
+        }
     }
 
     private static void verifyModel(String model) throws Exception {
@@ -157,38 +220,11 @@ public class SocialAppLabWorker {
             throw new IllegalStateException("LAB_MODEL does not match an installed Ollama model");
     }
 
-    private static List<Choice> choices(AndroidDriver driver, String xml) throws Exception {
-        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-        factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-        factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-        NodeList nodes = factory.newDocumentBuilder().parse(new InputSource(new StringReader(xml))).getElementsByTagName("*");
-        List<Choice> result = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        for (int i = 0; i < nodes.getLength(); i++) {
-            Element node = (Element) nodes.item(i);
-            if (!"true".equals(node.getAttribute("displayed"))) continue;
-            String text = node.getAttribute("text").strip();
-            String description = node.getAttribute("content-desc").strip();
-            String label = !description.isBlank() ? description : text;
-            if (!NAVIGATION.contains(label.toLowerCase(Locale.ROOT))) continue;
-            String id = node.getAttribute("resource-id");
-            String kind = !id.isBlank() ? "id" : "accessibility";
-            String locator = !id.isBlank() ? id : description;
-            if (locator.isBlank() || !seen.add(kind + ":" + locator)) continue;
-            By by = kind.equals("id") ? By.id(locator) : AppiumBy.accessibilityId(locator);
-            List<WebElement> matches = driver.findElements(by).stream()
-                    .filter(WebElement::isDisplayed).filter(WebElement::isEnabled).toList();
-            if (matches.size() == 1) result.add(new Choice(label, kind, locator));
-        }
-        return result;
-    }
-
-    private static int askModel(String model, String app, List<Choice> choices, int step, List<String> log)
+    private static int askModel(String model, String app, List<NavigationPolicy.Control> choices, int step, List<String> log)
             throws Exception {
         // Only navigation labels reach the local model. Screenshots, handles, messages and credentials stay local.
         String prompt = "You are testing navigation in " + app + " on a prelogged Android emulator. " +
-                "Select one useful navigation control to inspect, or stop. Only output JSON " +
+                "Choose one of the observed destination tabs to leave HOME and verify a different screen, or stop. Only output JSON " +
                 "{\"index\":number,\"reason\":string}; index -1 means stop. " +
                 "Never seek to view media, engage, send messages, register accounts or enter credentials. " +
                 "Step " + step + "; choices (zero-based): " +
