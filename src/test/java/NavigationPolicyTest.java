@@ -22,6 +22,18 @@ public final class NavigationPolicyTest {
         assertions++;
         if (!Objects.equals(expected, actual)) throw new AssertionError(scenario + ": expected " + expected + ", got " + actual);
     }
+    private static String ttNode(String id, String attributes, String body) {
+        return "<node package='com.zhiliaoapp.musically' displayed='true' resource-id='com.zhiliaoapp.musically:id/" + id + "' " + attributes + ">" + body + "</node>";
+    }
+    private static String ttScreen(boolean profile) {
+        String content = profile
+                ? ttNode("t3y", "text='@fixture'", "") + ttNode("t5q", "",
+                    ttNode("t89", "text='Following'", "") + ttNode("t89", "text='Followers'", "") + ttNode("t89", "text='Likes'", ""))
+                : ttNode("long_press_layout", "content-desc='Video'", "") + ttNode("", "content-desc='For You' selected='true'", "");
+        return "<hierarchy>" + content + ttNode("omy", "",
+                ttNode("omq", "content-desc='Home' clickable='true' enabled='true' selected='" + !profile + "'", "")
+                + ttNode("oms", "content-desc='Profile' clickable='true' enabled='true' selected='" + profile + "'", "")) + "</hierarchy>";
+    }
     public static void main(String[] args) throws Exception {
         String homeXml = screen("HOME", marker("reels_tray_container"));
         String profileXml = screen("PROFILE", marker("profile_header_container") + marker("row_profile_header"));
@@ -62,6 +74,24 @@ public final class NavigationPolicyTest {
         eq("MANUAL_AGE_VERIFICATION_REQUIRED", NavigationPolicy.observe("tiktok", "<hierarchy><node text=\"When\u2019s your birthdate?\"/></hierarchy>").blocker(), "age verification requires user input");
         String duplicateDestination = profileXml.replace("</hierarchy>", node("tab_bar", "", tab("profile_tab", "Profile", true, false)) + "</hierarchy>");
         eq("AMBIGUOUS_DESTINATION", NavigationPolicy.transition(home, requested, observe(duplicateDestination)), "duplicate destination rejected");
+        var ttHome = NavigationPolicy.observe("tiktok", ttScreen(false));
+        var ttProfile = NavigationPolicy.observe("tiktok", ttScreen(true));
+        eq(NavigationPolicy.Destination.HOME, ttHome.destination(), "TikTok observed Home structure");
+        eq(NavigationPolicy.Destination.PROFILE, ttProfile.destination(), "TikTok own profile content");
+        eq(1, NavigationPolicy.choices(ttHome).size(), "only verified TikTok destination offered");
+        var ttRequested = NavigationPolicy.choices(ttHome).get(0);
+        eq("VERIFIED", NavigationPolicy.transition(ttHome, ttRequested, ttProfile), "TikTok Home to own Profile");
+        eq("SAME_SCREEN", NavigationPolicy.transition(ttHome, ttRequested, ttHome), "TikTok ignored tap cannot pass");
+        eq(NavigationPolicy.Destination.UNKNOWN, NavigationPolicy.observe("tiktok", ttScreen(true).replace("@fixture", "")).destination(), "TikTok account marker required");
+        eq(NavigationPolicy.Destination.UNKNOWN, NavigationPolicy.observe("tiktok", ttScreen(true).replace("text='Followers'", "text='Other'")).destination(), "TikTok all profile metrics required");
+        eq(NavigationPolicy.Destination.UNKNOWN, NavigationPolicy.observe("tiktok", ttScreen(true).replace("id/t5q", "id/other")).destination(), "TikTok metrics require profile container");
+        eq(NavigationPolicy.Destination.UNKNOWN, NavigationPolicy.observe("tiktok", ttScreen(true).replace("id/omy", "id/other")).destination(), "TikTok controls require observed navigation bar");
+        eq(NavigationPolicy.Destination.UNKNOWN, NavigationPolicy.observe("instagram", ttScreen(true)).destination(), "TikTok markers cannot verify Instagram");
+        var ttLogin = NavigationPolicy.observe("tiktok", ttScreen(true).replace("</hierarchy>", "<node text='Log in to TikTok'/></hierarchy>"));
+        eq("MANUAL_SIGN_IN_REQUIRED", NavigationPolicy.transition(ttHome, ttRequested, ttLogin), "TikTok login overlay overrides profile");
+        var ttTutorial = NavigationPolicy.observe("tiktok", ttScreen(false).replace("</hierarchy>", ttNode("tv_strengthen_swipe_up_guide", "text='Swipe up for more'", "") + "</hierarchy>"));
+        eq("ONBOARDING_NAVIGATION_REQUIRED", ttTutorial.blocker(), "TikTok tutorial accurately blocks action");
+        eq(0, NavigationPolicy.choices(ttTutorial).size(), "no actions while onboarding intercepts tabs");
         var stable = new NavigationPolicy.Stability();
         eq(false, stable.accept("VERIFIED", 0), "one observation insufficient");
         eq(false, stable.accept("VERIFIED", 1000), "two observations insufficient");

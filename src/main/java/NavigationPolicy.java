@@ -15,6 +15,11 @@ public final class NavigationPolicy {
         public String summary() { return destination + "; markers=" + markers; }
     }
     private static final String IG = "com.instagram.android:id/";
+    // Observed on TikTok 47.0.3. Fail closed when the native layout changes.
+    private static final String TT = "com.zhiliaoapp.musically:id/";
+    private static final Map<String, Destination> TIKTOK_TABS = Map.of(
+            TT + "omq", Destination.HOME, TT + "oms", Destination.PROFILE);
+    private static final Set<String> TIKTOK_MARKERS = Set.of(TT + "long_press_layout", TT + "t5q");
     private static final Map<String, Destination> TABS = Map.of(
             IG + "feed_tab", Destination.HOME, IG + "profile_tab", Destination.PROFILE,
             IG + "search_tab", Destination.SEARCH);
@@ -37,6 +42,10 @@ public final class NavigationPolicy {
         factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
         NodeList nodes = factory.newDocumentBuilder().parse(new InputSource(new StringReader(xml)))
                 .getElementsByTagName("*");
+        boolean tiktok = app.equals("tiktok");
+        String expectedPackage = tiktok ? "com.zhiliaoapp.musically" : "com.instagram.android";
+        Map<String, Destination> tabs = tiktok ? TIKTOK_TABS : TABS;
+        String tabBar = tiktok ? TT + "omy" : IG + "tab_bar";
         Set<String> markers = new TreeSet<>();
         List<Control> controls = new ArrayList<>();
         String blocker = "";
@@ -55,20 +64,33 @@ public final class NavigationPolicy {
             }
             if (blocker.isEmpty() && "true".equals(node.getAttribute("password")))
                 blocker = "MANUAL_SIGN_IN_REQUIRED";
-            if (!app.equals("instagram") || !node.getAttribute("package").equals("com.instagram.android")) continue;
+            if (!Set.of("instagram", "tiktok").contains(app) || !node.getAttribute("package").equals(expectedPackage)) continue;
             String id = node.getAttribute("resource-id");
-            if (MARKERS.contains(id)) markers.add(id);
-            Destination destination = TABS.get(id);
+            if ((tiktok ? TIKTOK_MARKERS : MARKERS).contains(id)) markers.add(id);
+            if (tiktok) {
+                if (id.equals(TT + "tv_strengthen_swipe_up_guide") && blocker.isEmpty())
+                    blocker = "ONBOARDING_NAVIGATION_REQUIRED";
+                String text = node.getAttribute("text").strip();
+                String description = node.getAttribute("content-desc").strip();
+                if ((text.equals("For You") || description.equals("For You")) && selected(node))
+                    markers.add("tiktok:for-you");
+                if (id.equals(TT + "t3y") && text.startsWith("@") && text.length() > 1)
+                    markers.add("tiktok:account-handle");
+                if (id.equals(TT + "t89") && insideContainer(node, TT + "t5q")
+                        && Set.of("Following", "Followers", "Likes").contains(text))
+                    markers.add("tiktok:metric:" + text);
+            }
+            Destination destination = tabs.get(id);
             if (destination == null || !"true".equals(node.getAttribute("clickable"))
                     || !"true".equals(node.getAttribute("enabled"))) continue;
             String label = node.getAttribute("content-desc").strip();
-            if (!LABELS.get(destination).equals(label) || !insideTabBar(node)) continue;
+            if (!LABELS.get(destination).equals(label) || !insideContainer(node, tabBar)) continue;
             controls.add(new Control(label, id, destination, selected(node)));
         }
         Set<Destination> selected = new HashSet<>();
         controls.stream().filter(Control::selected).forEach(c -> selected.add(c.destination()));
         Destination destination = selected.size() == 1 ? selected.iterator().next() : Destination.UNKNOWN;
-        if (!hasDestinationMarkers(destination, markers)) destination = Destination.UNKNOWN;
+        if (!hasDestinationMarkers(app, destination, markers)) destination = Destination.UNKNOWN;
         return new Screen(destination, Set.copyOf(markers), List.copyOf(controls), blocker);
     }
 
@@ -78,9 +100,9 @@ public final class NavigationPolicy {
         return true;
     }
 
-    private static boolean insideTabBar(Element node) {
+    private static boolean insideContainer(Element node, String containerId) {
         for (org.w3c.dom.Node parent = node.getParentNode(); parent instanceof Element element; parent = parent.getParentNode())
-            if ((IG + "tab_bar").equals(element.getAttribute("resource-id"))) return true;
+            if (containerId.equals(element.getAttribute("resource-id"))) return true;
         return false;
     }
 
@@ -94,7 +116,13 @@ public final class NavigationPolicy {
         return false;
     }
 
-    private static boolean hasDestinationMarkers(Destination destination, Set<String> markers) {
+    private static boolean hasDestinationMarkers(String app, Destination destination, Set<String> markers) {
+        if (app.equals("tiktok")) return switch (destination) {
+            case HOME -> markers.containsAll(Set.of(TT + "long_press_layout", "tiktok:for-you"));
+            case PROFILE -> markers.containsAll(Set.of(TT + "t5q", "tiktok:account-handle",
+                    "tiktok:metric:Following", "tiktok:metric:Followers", "tiktok:metric:Likes"));
+            case SEARCH, UNKNOWN -> false;
+        };
         return switch (destination) {
             case HOME -> markers.contains(IG + "reels_tray_container");
             case PROFILE -> markers.containsAll(Set.of(IG + "profile_header_container", IG + "row_profile_header"));
