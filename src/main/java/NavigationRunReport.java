@@ -15,6 +15,7 @@ public final class NavigationRunReport {
     private List<String> route = List.of();
     private int stoppedAtStep;
     private String stopStage = "";
+    private Map<String, Object> context = Map.of();
 
     public NavigationRunReport(String app, String device, String goal, Path directory) {
         this.app = app; this.device = device; this.goal = goal; this.directory = directory;
@@ -26,23 +27,34 @@ public final class NavigationRunReport {
     }
 
     public void route(List<NavigationPolicy.Destination> value) {
-        route = value.stream().map(Enum::name).toList();
+        routeNames(value.stream().map(Enum::name).toList());
     }
+    public void routeNames(List<String> value) { route = List.copyOf(value); }
+    public void context(Map<String, Object> value) { context = Map.copyOf(value); }
 
     public void stopContext(int step, String stage) { stoppedAtStep = step; stopStage = stage; }
 
     public void beginStep(int number, NavigationPolicy.Destination source, NavigationPolicy.Control action, String before) {
+        beginStep(number, source.name(), action.label().isEmpty() ? "Return to Home (unlabelled icon)" : action.label(),
+                action.id(), action.destination().name(), before);
+    }
+
+    public void beginStep(int number, String source, String control, String locator, String destination, String before) {
         var step = new LinkedHashMap<String, Object>();
-        step.put("step", number); step.put("source", source.name()); step.put("requestedDestination", action.destination().name());
-        step.put("control", action.label().isEmpty() ? "Return to Home (unlabelled icon)" : action.label());
-        step.put("locator", action.id()); step.put("beforeScreenshot", before); step.put("afterScreenshot", "");
+        step.put("step", number); step.put("source", source); step.put("requestedDestination", destination);
+        step.put("control", control);
+        step.put("locator", locator); step.put("beforeScreenshot", before); step.put("afterScreenshot", "");
         step.put("verifiedDestination", ""); step.put("result", "PENDING");
         steps.add(step);
     }
 
     public void finishStep(int number, NavigationPolicy.Destination destination, String after, String verdict) {
+        finishStep(number, destination.name(), after, verdict);
+    }
+
+    public void finishStep(int number, String destination, String after, String verdict) {
         var step = steps.get(number - 1);
-        step.put("verifiedDestination", destination.name()); step.put("afterScreenshot", after); step.put("result", verdict);
+        step.put("verifiedDestination", destination); step.put("afterScreenshot", after); step.put("result", verdict);
     }
 
     public void failStep(int number, String reason) {
@@ -54,8 +66,15 @@ public final class NavigationRunReport {
     }
 
     public void verified(String phase, NavigationPolicy.Screen screen, String screenshot) {
-        screens.add(Map.of("phase", phase, "screen", screen.destination().name(),
-                "markers", new TreeSet<>(screen.markers()), "screenshot", screenshot));
+        verified(phase, screen.destination().name(), screen.markers(), screenshot);
+    }
+
+    public void verified(String phase, String screen, Set<String> markers, String screenshot) {
+        screens.add(Map.of("phase", phase, "screen", screen, "markers", new TreeSet<>(markers), "screenshot", screenshot));
+    }
+
+    public void action(String phase, String label, String locator, String destination) {
+        actions.add(Map.of("phase", phase, "label", label, "locator", locator, "destination", destination));
     }
 
     public void write(boolean passed, String reason, int taps, List<String> log) throws Exception {
@@ -81,6 +100,7 @@ public final class NavigationRunReport {
         result.put("passed", passed); result.put("reason", reason);
         result.put("requestedDestination", route.isEmpty() ? goal.toUpperCase(Locale.ROOT) : route.get(route.size() - 1));
         result.put("route", route); result.put("steps", steps);
+        result.put("context", context);
         result.put("stoppedAtStep", passed ? null : stoppedAtStep); result.put("stopStage", stopStage);
         result.put("destinationTaps", taps); result.put("actions", actions); result.put("verifiedScreens", screens);
         result.put("screenshots", screenshots); result.put("observations", List.copyOf(log));
@@ -93,6 +113,9 @@ public final class NavigationRunReport {
                 .append("\n- Destination taps: ").append(taps).append("\n\n## Actions taken\n\n");
         if (!passed && !stopStage.isEmpty()) md.append("Stopped at route step ").append(stoppedAtStep)
                 .append(" (0 means setup), while ").append(escape(stopStage)).append(".\n\n");
+        for (var entry : context.entrySet()) md.append("- ").append(escape(entry.getKey())).append(": ")
+                .append(escape(entry.getValue())).append('\n');
+        if (!context.isEmpty()) md.append('\n');
         if (actions.isEmpty()) md.append("No navigation actions were taken.\n");
         else {
             md.append("| Phase | Observed control | Intended screen |\n|---|---|---|\n");

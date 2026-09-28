@@ -236,6 +236,7 @@ public final class NavigationPolicyTest {
         eq(false, stable.accept("VERIFIED", 3100), "rapid observations insufficient");
         eq(false, stable.accept("VERIFIED", 3200), "three rapid observations still insufficient");
         eq(true, stable.accept("VERIFIED", 5000), "renewed sustained destination");
+        assertions += UserSearchPolicyTest.run();
         System.out.println("VERIFIED_NAVIGATION_TESTS_PASSED: " + assertions + " assertions");
     }
 }

@@ -1,6 +1,6 @@
 # BOTFARM native navigation goals
 
-Select an app, emulator, and goal. Local Ollama `qwen3:8b` chooses among the observed, permitted navigation controls; deterministic checks decide whether the requested destination was reached. Accounts must be signed in manually. The worker never enters credentials, submits search queries, creates accounts, or uses engagement/composer controls.
+Select an app, emulator, and goal. Local Ollama `qwen3:8b` chooses among the observed, permitted navigation controls; deterministic checks decide whether the requested destination was reached. Accounts must be signed in manually. The worker never enters credentials, creates accounts, or uses engagement/composer controls. Only the explicit `user-search` goal may enter and submit a supplied exact handle; ordinary navigation goals never submit searches.
 
 ## Choose and run a goal
 
@@ -27,7 +27,28 @@ Every goal starts from verified Home. If necessary, the worker uses the observed
 
 Defaults preserve the existing regression cases: Instagram uses `emulator-5554` / `search`; TikTok uses `emulator-5556` / `profile`. `-Device` overrides the device explicitly. Without arguments, the runner uses TikTok. `-ListGoals` only lists supported goals and does not start services. Direct Java invocation accepts `SocialAppLabWorker <app> [goal]` with device from `LAB_DEVICE`.
 
-The two fixed multi-step routes use controls inspected on the signed-in devices. Instagram's Search tab exposes the Profile tab. TikTok's Search form exposes only its return icon, so the route verifies Home again before selecting Profile. No query is submitted and no content item is opened. Other goals, including Settings, Inbox, followers lists, submitted searches, content items, and arbitrary routes, are unsupported. Unsupported goal names are rejected rather than approximated. The worker stops at login, verification, tutorial, crash prompts, or unrecognized layouts.
+The two fixed multi-step routes use controls inspected on the signed-in devices. Instagram's Search tab exposes the Profile tab. TikTok's Search form exposes only its return icon, so the route verifies Home again before selecting Profile. These routes submit no query and open no content item. Settings, Inbox, followers lists, general searches, content items, and arbitrary routes are unsupported. Unsupported goal names are rejected rather than approximated. The worker stops at login, verification, tutorial, crash prompts, permission dialogs, or unrecognized layouts.
+
+## Exact-handle user search
+
+Both apps passed live exact-handle account search on the configured devices using a user-supplied handle. The four single-step goals and both multi-step routes have separate live evidence. Account values, inspected UI contracts, screenshots, and reports remain local and Git-ignored.
+
+With the locally calibrated UI contract present:
+
+```powershell
+$handle = Read-Host 'Exact Instagram username (not display name or URL)'
+powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App instagram -Device emulator-5554 -Goal user-search -Handle $handle
+$handle = Read-Host 'Exact TikTok username (not display name or URL)'
+powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Device emulator-5556 -Goal user-search -Handle $handle
+```
+
+There is no default account. Missing handles are rejected before services or device actions. An optional leading `@` is accepted; URLs, whitespace, general queries, and non-ASCII handles are rejected. Matching ignores ASCII case only, with no substring, display-name, ranking, or Unicode-confusable fallback. The observed TikTok whole-username LRM + FSI/PDI formatting wrapper is accepted; embedded or incomplete directional controls are rejected. Supported input is a conservative subset of username syntax (letters, digits, underscores, and internal periods; maximum 30 characters for Instagram and 24 for TikTok).
+
+The pipeline first runs the verified LLM Home → Search navigation as preparation, linking its separate report. It then verifies the input, enters the supplied handle, submits it, selects **Accounts** on Instagram or **Users** on TikTok, and requires that category to be selected. It opens only one exact username match in the inspected account-row username field. Duplicate or missing matches stop the run. Display names and video captions cannot authorize profile opening. The profile must independently expose the exact handle and its profile markers, with the results screen gone, across stable observations and again after its screenshot. It never taps Follow, Message, media, or suggested fallback results. It does not scroll for additional matches. Start from signed-in Home or a recognized navigation screen; after a successful search, return to Home before another run. Other-account profiles are not treated as the signed-in Profile regression screen.
+
+App-version-specific result fields are explicit rather than guessed. The worker reads `startup-diagnosis/user-search/<app>-ui.local.json`, or the file selected by `-SearchUiContract`. The JSON fields are `app`, `queryId` (results-page EditText or static TextView query label), `tabId` (Accounts/Users tab resource ID, or empty for the inspected Instagram Button chip / TikTok FrameLayout tab), `tabContainerId`, `resultsId`, `rowId` (clickable account row), `usernameId` (actual username, never display name), `profileHandleId`, and a nonempty `profileMarkers` array. All nonempty resource IDs must belong to the selected app. Id-less tabs are scoped to the configured container, exact category label, and inspected per-app class. These fields must be calibrated by inspecting the actual account-results/profile UI for the user-supplied handle; no speculative selector defaults or sample account are used. A missing contract stops with `SEARCH_UI_CONTRACT_REQUIRED` before device interaction. UI contracts and account-bearing evidence stay Git-ignored.
+
+User-search reports record every verified stage with before/after screenshots, the exact requested and verified handle in local `context`, setup/preparation separately, and an explicit stop reason. Only allowed navigation labels go to Ollama; the handle and result contents do not.
 
 ## Goal verification and reports
 

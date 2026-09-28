@@ -21,6 +21,14 @@ public class SocialAppLabWorker {
     private record Observation(String xml, NavigationPolicy.Screen screen) {}
 
     public static void main(String[] args) throws Exception {
+        if (args.length == 2 && args[1].equals("user-search")) {
+            UserSearchWorker.run(args[0]);
+            return;
+        }
+        runNavigation(args);
+    }
+
+    static Path runNavigation(String[] args) throws Exception {
         if (args.length < 1 || args.length > 2 || !Set.of("instagram", "tiktok").contains(args[0]))
             throw new IllegalArgumentException("Usage: SocialAppLabWorker tiktok|instagram [search|profile|search-to-profile]");
         long started = System.nanoTime();
@@ -161,7 +169,10 @@ public class SocialAppLabWorker {
             if (driver != null) collectAndroidEvidence(device, pkg, dir, log);
         } finally {
             if (driver != null) try { driver.quit(); }
-            catch (Exception ignored) { passed = false; reason = "DRIVER_CLEANUP_FAILED"; }
+            catch (Exception ignored) {
+                log.add("Driver cleanup failed");
+                if (passed) { passed = false; reason = "DRIVER_CLEANUP_FAILED"; }
+            }
             log.add((passed ? (route.completed() > 1 ? "PASS: verified route " + route.description()
                     : "PASS: verified transition HOME -> " + requested) : "FAIL: " + reason)
                     + "; destination taps: " + taps);
@@ -172,6 +183,7 @@ public class SocialAppLabWorker {
             log.forEach(System.out::println);
         }
         if (!passed) throw new IllegalStateException("Navigation not verified; inspect " + dir.resolve("report.txt"));
+        return dir;
     }
 
     private static Observation observe(AndroidDriver driver, String app, String pkg) throws Exception {

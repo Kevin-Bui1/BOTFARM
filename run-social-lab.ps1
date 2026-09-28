@@ -1,7 +1,9 @@
 param(
     [ValidateSet('tiktok','instagram')][string]$App = 'tiktok',
     [ValidatePattern('^[A-Za-z0-9._:-]+$')][string]$Device,
-    [ValidateSet('search','profile','search-to-profile')][string]$Goal,
+    [ValidateSet('search','profile','search-to-profile','user-search')][string]$Goal,
+    [string]$Handle,
+    [string]$SearchUiContract,
     [switch]$ListGoals
 )
 $ErrorActionPreference = 'Stop'
@@ -10,10 +12,26 @@ if ($ListGoals) {
     Write-Output 'tiktok: profile (Home -> Profile), search (Home -> Search form; no query submission)'
     Write-Output 'instagram: search-to-profile (Home -> Search -> Profile)'
     Write-Output 'tiktok: search-to-profile (Home -> Search form -> Home -> Profile)'
+    Write-Output 'instagram/tiktok: user-search (-Handle required; exact account-only result and profile identity; calibrated local UI contract required)'
     return
 }
 if (!$Device) { $Device = if ($App -eq 'tiktok') { 'emulator-5556' } else { 'emulator-5554' } }
 if (!$Goal) { $Goal = if ($App -eq 'tiktok') { 'profile' } else { 'search' } }
+if ($Goal -eq 'user-search') {
+    if (!$Handle) { throw 'HANDLE_REQUIRED: provide -Handle; no account is chosen by default.' }
+    $limit = if ($App -eq 'instagram') { 30 } else { 24 }
+    $username = $Handle -replace '^@',''
+    if ($username -notmatch "^[A-Za-z0-9._]{1,$limit}$" -or $username.StartsWith('.') -or $username.EndsWith('.') -or $username.Contains('..')) {
+        throw 'INVALID_HANDLE: provide an exact username, not a URL or display name.'
+    }
+    $env:LAB_SEARCH_HANDLE = $Handle
+    if ($SearchUiContract) { $env:LAB_SEARCH_UI_CONTRACT = [IO.Path]::GetFullPath($SearchUiContract) }
+    else { Remove-Item Env:LAB_SEARCH_UI_CONTRACT -ErrorAction SilentlyContinue }
+} else {
+    if ($Handle -or $SearchUiContract) { throw '-Handle and -SearchUiContract apply only to -Goal user-search.' }
+    Remove-Item Env:LAB_SEARCH_HANDLE -ErrorAction SilentlyContinue
+    Remove-Item Env:LAB_SEARCH_UI_CONTRACT -ErrorAction SilentlyContinue
+}
 Set-Location $PSScriptRoot
 $env:JAVA_HOME = 'C:\Program Files\Java\jdk-26.0.1'
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
