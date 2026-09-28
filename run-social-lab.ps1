@@ -15,7 +15,29 @@ if ($ListGoals) {
     Write-Output 'instagram/tiktok: user-search (-Handle required; exact account-only result and profile identity; calibrated local UI contract required)'
     return
 }
-if (!$Device) { $Device = if ($App -eq 'tiktok') { 'emulator-5556' } else { 'emulator-5554' } }
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+$adb = Join-Path $env:ANDROID_HOME 'platform-tools\adb.exe'
+$expectedAvd = if ($App -eq 'tiktok') { 'BOTFARM_API35_4KB' } else { 'Pixel_10_-_First_Device_Test' }
+function Find-AvdDevice([string]$AvdName) {
+    if (!(Test-Path $adb)) { return $null }
+    $found = @()
+    foreach ($line in @(& $adb devices 2>$null)) {
+        if ($line -notmatch '^(emulator-\d+)\s+device$') { continue }
+        $candidate = $matches[1]
+        $name = ((& $adb -s $candidate emu avd name 2>$null | Select-Object -First 1) -as [string]).Trim()
+        if ($name -eq $AvdName) { $found += $candidate }
+    }
+    if ($found.Count -gt 1) { throw "AMBIGUOUS_AVD: more than one online device is $AvdName" }
+    if ($found.Count -eq 1) { return $found[0] }
+    return $null
+}
+$resolvedDevice = Find-AvdDevice $expectedAvd
+if (!$Device) {
+    if (!$resolvedDevice) { throw "AVD_NOT_CONNECTED: start $expectedAvd, or specify its current emulator port with -Device." }
+    $Device = $resolvedDevice
+} elseif ($Device -match '^emulator-\d+$' -and $resolvedDevice -and $Device -ne $resolvedDevice) {
+    throw "DEVICE_AVD_MISMATCH: $expectedAvd is $resolvedDevice, not $Device. Use -Device $resolvedDevice or omit -Device."
+}
 if (!$Goal) { $Goal = if ($App -eq 'tiktok') { 'profile' } else { 'search' } }
 if ($Goal -eq 'user-search') {
     if (!$Handle) { throw 'HANDLE_REQUIRED: provide -Handle; no account is chosen by default.' }
@@ -34,7 +56,6 @@ if ($Goal -eq 'user-search') {
 }
 Set-Location $PSScriptRoot
 $env:JAVA_HOME = 'C:\Program Files\Java\jdk-26.0.1'
-$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 $env:LAB_MODEL = 'qwen3:8b'
 $env:LAB_DEVICE = $Device
 $env:OLLAMA_HOST = '127.0.0.1:11434'

@@ -119,30 +119,43 @@ public final class UserSearchWorker {
                 var input = unique(By.id(inputId));
                 input.clear(); input.sendKeys(handle);
             }, ui -> ui.query(inputId, handle), Set.of(inputId, "exact query value"));
-            step("Submit the supplied handle query", app.equals("tiktok") ? pkg + ":id/tv_search_textview" : "IME search", () -> {
-                observe().query(inputId, handle);
-                if (app.equals("tiktok")) {
+            if (app.equals("instagram")) {
+                step("Observe typed-query results without opening content", contract.resultsId(), () ->
+                        observe().query(inputId, handle),
+                        ui -> ui.exactAccountSuggestion(contract, inputId, handle),
+                        Set.of(inputId, contract.resultsId(), contract.usernameId(), "account username field distinguished from keyword/video fields"));
+                step("Verify unique exact-username account suggestion", contract.usernameId(), () -> {},
+                        ui -> ui.exactAccountSuggestion(contract, inputId, handle),
+                        Set.of(contract.resultsId(), contract.rowId(), contract.usernameId(), "unique exact account username"));
+            } else {
+                step("Submit the supplied handle query", pkg + ":id/tv_search_textview", () -> {
+                    observe().query(inputId, handle);
                     String id = pkg + ":id/tv_search_textview";
                     var submit = observe().one(id);
                     if (!submit.getAttribute("class").equals("android.widget.Button") || !submit.getAttribute("text").equals("Search"))
                         throw new IllegalStateException("SEARCH_SUBMIT_NOT_VERIFIED");
                     click(By.id(id));
-                } else driver.executeScript("mobile: performEditorAction", Map.of("action", "search"));
-            }, ui -> { ui.resultQuery(contract.queryId(), handle); ui.category(contract); },
-                    Set.of(contract.queryId(), contract.tabContainerId(), "account category available"));
-            String categoryLocator = UserSearchPolicy.categoryXpath(contract);
-            step("Select/verify account-only category: " + contract.category(), categoryLocator, () -> {
-                var ui = observe(); ui.resultQuery(contract.queryId(), handle); var category = ui.category(contract);
-                if (!category.getAttribute("selected").equals("true")) click(By.xpath(UserSearchPolicy.categoryXpath(contract)));
-            }, ui -> ui.accounts(contract, handle), Set.of(categoryLocator, contract.resultsId(), "selected account-only category"));
-            var target = observe().exactAccount(contract, handle);
+                }, ui -> { ui.resultQuery(contract.queryId(), handle); ui.category(contract); },
+                        Set.of(contract.queryId(), contract.tabContainerId(), "account category available"));
+                String categoryLocator = UserSearchPolicy.categoryXpath(contract);
+                step("Select/verify account-only category: " + contract.category(), categoryLocator, () -> {
+                    var ui = observe(); ui.resultQuery(contract.queryId(), handle); var category = ui.category(contract);
+                    if (!category.getAttribute("selected").equals("true")) click(By.xpath(categoryLocator));
+                }, ui -> ui.accounts(contract, handle), Set.of(categoryLocator, contract.resultsId(), "selected account-only category"));
+            }
+            var target = exactAccount();
             step("Open unique exact-username account result", contract.usernameId(), () -> {
-                var fresh = observe().exactAccount(contract, handle);
+                var fresh = exactAccount();
                 if (!fresh.equals(target)) throw new IllegalStateException("ACCOUNT_RESULT_CHANGED");
                 click(By.xpath(fresh.xpath()));
             }, ui -> ui.profile(contract, handle), profileEvidence());
             snapshot(driver, dir, "after");
             observedHandle = observe().profile(contract, handle); // Final identity check after screenshot capture.
+        }
+        private UserSearchPolicy.Target exactAccount() throws Exception {
+            var ui = observe();
+            return app.equals("instagram") ? ui.exactAccountSuggestion(contract, inputId, handle)
+                    : ui.exactAccount(contract, handle);
         }
         private Set<String> profileEvidence() {
             var markers = new HashSet<>(contract.profileMarkers());

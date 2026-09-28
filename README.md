@@ -6,12 +6,12 @@ Select an app, emulator, and goal. Local Ollama `qwen3:8b` chooses among the obs
 
 ```powershell
 powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -ListGoals
-powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App instagram -Device emulator-5554 -Goal search
-powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App instagram -Device emulator-5554 -Goal profile
-powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Device emulator-5556 -Goal profile
-powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Device emulator-5556 -Goal search
-powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App instagram -Device emulator-5554 -Goal search-to-profile
-powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Device emulator-5556 -Goal search-to-profile
+powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App instagram -Goal search
+powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App instagram -Goal profile
+powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Goal profile
+powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Goal search
+powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App instagram -Goal search-to-profile
+powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Goal search-to-profile
 ```
 
 | App | Goal | Deterministic destination evidence |
@@ -25,7 +25,7 @@ powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Device em
 
 Every goal starts from verified Home. If necessary, the worker uses the observed Home tab or Search return control to prepare Home first. Preparation is logged separately and cannot satisfy PASS. TikTok Search means opening the Search form, not performing a query or opening a result. App-provided suggestions/hint text may appear; the worker does not type or submit anything.
 
-Defaults preserve the existing regression cases: Instagram uses `emulator-5554` / `search`; TikTok uses `emulator-5556` / `profile`. `-Device` overrides the device explicitly. Without arguments, the runner uses TikTok. `-ListGoals` only lists supported goals and does not start services. Direct Java invocation accepts `SocialAppLabWorker <app> [goal]` with device from `LAB_DEVICE`.
+The launcher resolves the online device by AVD name (`Pixel_10_-_First_Device_Test` for Instagram and `BOTFARM_API35_4KB` for TikTok), so emulator port order may change between launches. `-Device` selects a port explicitly and rejects a connected AVD mismatch with a corrective hint. Without arguments, the runner uses TikTok's default goal. `-ListGoals` only lists supported goals and does not start services. Direct Java invocation accepts `SocialAppLabWorker <app> [goal]` with device from `LAB_DEVICE`.
 
 The two fixed multi-step routes use controls inspected on the signed-in devices. Instagram's Search tab exposes the Profile tab. TikTok's Search form exposes only its return icon, so the route verifies Home again before selecting Profile. These routes submit no query and open no content item. Settings, Inbox, followers lists, general searches, content items, and arbitrary routes are unsupported. Unsupported goal names are rejected rather than approximated. The worker stops at login, verification, tutorial, crash prompts, permission dialogs, or unrecognized layouts.
 
@@ -37,14 +37,14 @@ With the locally calibrated UI contract present:
 
 ```powershell
 $handle = Read-Host 'Exact Instagram username (not display name or URL)'
-powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App instagram -Device emulator-5554 -Goal user-search -Handle $handle
+powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App instagram -Goal user-search -Handle $handle
 $handle = Read-Host 'Exact TikTok username (not display name or URL)'
-powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Device emulator-5556 -Goal user-search -Handle $handle
+powershell -NoProfile -File D:\BOTFARM\run-social-lab.ps1 -App tiktok -Goal user-search -Handle $handle
 ```
 
 There is no default account. Missing handles are rejected before services or device actions. An optional leading `@` is accepted; URLs, whitespace, general queries, and non-ASCII handles are rejected. Matching ignores ASCII case only, with no substring, display-name, ranking, or Unicode-confusable fallback. The observed TikTok whole-username LRM + FSI/PDI formatting wrapper is accepted; embedded or incomplete directional controls are rejected. Supported input is a conservative subset of username syntax (letters, digits, underscores, and internal periods; maximum 30 characters for Instagram and 24 for TikTok).
 
-The pipeline first runs the verified LLM Home → Search navigation as preparation, linking its separate report. It then verifies the input, enters the supplied handle, submits it, selects **Accounts** on Instagram or **Users** on TikTok, and requires that category to be selected. It opens only one exact username match in the inspected account-row username field. Duplicate or missing matches stop the run. Display names and video captions cannot authorize profile opening. The profile must independently expose the exact handle and its profile markers, with the results screen gone, across stable observations and again after its screenshot. It never taps Follow, Message, media, or suggested fallback results. It does not scroll for additional matches. Start from signed-in Home or a recognized navigation screen; after a successful search, return to Home before another run. Other-account profiles are not treated as the signed-in Profile regression screen.
+The pipeline first runs the verified LLM Home → Search navigation as preparation, linking its separate report. It then verifies the input and enters the supplied handle. Instagram uses the observed typed-query suggestion surface, where account usernames have a distinct native field from keyword and video fields. TikTok submits the query, selects **Users**, and requires that category to be selected. It opens only one exact username match in the inspected account-row username field. Duplicate or missing matches stop the run. Display names, keywords, and video captions cannot authorize profile opening. The profile must independently expose the exact handle and its profile markers, with the results screen gone, across stable observations and again after its screenshot. It never taps Follow, Message, media, or suggested fallback results. It does not scroll for additional matches. Start from signed-in Home or a recognized navigation screen; after a successful search, return to Home before another run. Other-account profiles are not treated as the signed-in Profile regression screen.
 
 App-version-specific result fields are explicit rather than guessed. The worker reads `startup-diagnosis/user-search/<app>-ui.local.json`, or the file selected by `-SearchUiContract`. The JSON fields are `app`, `queryId` (results-page EditText or static TextView query label), `tabId` (Accounts/Users tab resource ID, or empty for the inspected Instagram Button chip / TikTok FrameLayout tab), `tabContainerId`, `resultsId`, `rowId` (clickable account row), `usernameId` (actual username, never display name), `profileHandleId`, and a nonempty `profileMarkers` array. All nonempty resource IDs must belong to the selected app. Id-less tabs are scoped to the configured container, exact category label, and inspected per-app class. These fields must be calibrated by inspecting the actual account-results/profile UI for the user-supplied handle; no speculative selector defaults or sample account are used. A missing contract stops with `SEARCH_UI_CONTRACT_REQUIRED` before device interaction. UI contracts and account-bearing evidence stay Git-ignored.
 
@@ -81,6 +81,6 @@ The configured workstation uses JDK 26.0.1, Maven 3.9.16 under `D:\Tools`, the A
 
 ## Device and version limits
 
-The original `Pixel_10_-_First_Device_Test` AVD (`emulator-5554`) retains its image and app data; TikTok previously aborted outside Appium on that 16 KB image. TikTok runs on the separate `BOTFARM_API35_4KB` AVD (`emulator-5556`, Android 35 Google Play, 4 KB pages, 4 GB RAM, physical keyboard enabled). Neither device is wiped or reconfigured by the goal runner.
+The original `Pixel_10_-_First_Device_Test` AVD retains its image and app data; TikTok previously aborted outside Appium on that 16 KB image. TikTok runs on the separate `BOTFARM_API35_4KB` AVD (Android 35 Google Play, 4 KB pages, 4 GB RAM, physical keyboard enabled). Emulator ports are assigned at launch and are not treated as stable identities. Neither device is wiped or reconfigured by the goal runner.
 
 TikTok selectors were inspected on version 47.0.3. Unknown or changed layouts stop safely and require fresh inspection. Bounded startup/navigation checks do not certify indefinite stability or other app versions.

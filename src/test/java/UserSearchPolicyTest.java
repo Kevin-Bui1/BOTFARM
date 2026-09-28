@@ -46,6 +46,17 @@ public final class UserSearchPolicyTest {
                 rejects("RESULT_QUERY_NOT_VERIFIED", () -> new UserSearchPolicy.Ui(app, observed.replace("class='android.widget.TextView'", "class='android.widget.ImageView'")).exactAccount(nativeChips, "fixture_user"));
                 rejects("QUERY_CHANGED", () -> new UserSearchPolicy.Ui(app, observed.replace("text='fixture_user'", "text='different_query'")).exactAccount(nativeChips, "fixture_user"));
                 rejects("AMBIGUOUS_ACCOUNT_CATEGORY", () -> new UserSearchPolicy.Ui(app, observed.replace(chip, chip + chip)).exactAccount(nativeChips, "fixture_user"));
+                String suggestions = xml.replace(tabs, node("keyword", "text='fixture_user'", ""))
+                        .replace(p + "account_row", p + "row_search_user_container")
+                        .replace("class='android.view.ViewGroup'", "class='android.widget.Button'");
+                eq("@fixture_user", new UserSearchPolicy.Ui(app, suggestions)
+                        .exactAccountSuggestion(nativeChips, c.queryId(), "fixture_user").handle(),
+                        "mixed suggestions authorize only the exact account username field");
+                rejects("EXACT_ACCOUNT_NOT_FOUND", () -> new UserSearchPolicy.Ui(app,
+                        suggestions.replace(p + "username", p + "video_caption"))
+                        .exactAccountSuggestion(nativeChips, c.queryId(), "fixture_user"));
+                rejects("QUERY_CHANGED", () -> new UserSearchPolicy.Ui(app, suggestions)
+                        .exactAccountSuggestion(nativeChips, c.queryId(), "other_user"));
             }
             if (app.equals("tiktok")) {
                 var nativeTabs = new UserSearchPolicy.Contract(app, c.queryId(), "", c.tabContainerId(), c.resultsId(), c.rowId(), c.usernameId(), c.profileHandleId(), c.profileMarkers());

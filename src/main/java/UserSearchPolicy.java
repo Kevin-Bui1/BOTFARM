@@ -156,7 +156,13 @@ public final class UserSearchPolicy {
         }
         public Target exactAccount(Contract c, String handle) {
             accounts(c, handle);
-            Element results = one(c.resultsId());
+            return exactAccountIn(one(c.resultsId()), c, handle);
+        }
+        public Target exactAccountSuggestion(Contract c, String inputId, String handle) {
+            query(inputId, handle);
+            return exactAccountIn(one(c.resultsId()), c, handle);
+        }
+        private Target exactAccountIn(Element results, Contract c, String handle) {
             var matches = new ArrayList<Element>();
             for (Element username : byId(c.usernameId())) {
                 if (!inside(username, results) || !exact(handle, username.getAttribute("text"))) continue;
